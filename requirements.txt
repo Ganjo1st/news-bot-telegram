@@ -4,7 +4,9 @@ deep-translator==1.11.4
 APScheduler==3.10.4
 beautifulsoup4==4.12.2
 requests==2.31.0
-newspaper3k==0.2.8  # Для извлечения статей
-lxml==4.9.3  # Для быстрого парсинга
-pillow==10.1.0  # Для работы с картинками
-aiohttp==3.9.1  # Для асинхронных запросов
+newspaper3k==0.2.8
+lxml==4.9.3
+pillow==10.1.0
+aiohttp==3.9.1
+trafilatura==1.6.0  # Специально для извлечения текста
+readability-lxml==0.8.1  # Еще один инструмент для текста
