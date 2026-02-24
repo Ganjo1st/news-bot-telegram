@@ -1,7 +1,7 @@
 """
 🤖 Telegram News Bot - Мультиисточник
 Безопасный бот для публикации новостей из нескольких RSS
-Версия 2.0 - Global Research + InfoBrics + RT
+Версия 2.1 - с автосозданием файла
 """
 
 import os
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация из переменных окружения
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
-CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')  # Замените на ваш Chat ID когда получите
+CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')  # Замените на ваш Chat ID
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '7200'))  # 2 часа
 
 # Несколько RSS источников
@@ -53,6 +53,12 @@ SENT_LINKS_FILE = 'sent_links.json'
 
 class NewsBot:
     def __init__(self):
+        # СОЗДАЕМ ФАЙЛ АВТОМАТИЧЕСКИ, ЕСЛИ ЕГО НЕТ
+        if not os.path.exists(SENT_LINKS_FILE):
+            logger.info(f"📁 Создаю файл {SENT_LINKS_FILE}")
+            with open(SENT_LINKS_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+        
         self.bot = Bot(token=TELEGRAM_TOKEN)
         self.translator = Translator()
         self.scheduler = AsyncIOScheduler()
@@ -63,7 +69,9 @@ class NewsBot:
         try:
             if os.path.exists(SENT_LINKS_FILE):
                 with open(SENT_LINKS_FILE, 'r', encoding='utf-8') as f:
-                    return set(json.load(f))
+                    data = json.load(f)
+                    logger.info(f"📂 Загружено {len(data)} отправленных ссылок")
+                    return set(data)
         except Exception as e:
             logger.error(f"Ошибка загрузки sent_links: {e}")
         return set()
@@ -73,6 +81,7 @@ class NewsBot:
         try:
             with open(SENT_LINKS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(list(self.sent_links), f, ensure_ascii=False, indent=2)
+            logger.info(f"💾 Сохранено {len(self.sent_links)} ссылок")
         except Exception as e:
             logger.error(f"Ошибка сохранения sent_links: {e}")
     
@@ -152,9 +161,6 @@ class NewsBot:
                 
             news = await self.fetch_news_from_feed(feed_config)
             all_news.extend(news)
-        
-        # Сортируем по дате (если есть) - новые первыми
-        # Простая сортировка - сначала новые
         
         logger.info(f"📊 Всего новых новостей: {len(all_news)}")
         return all_news
@@ -298,18 +304,13 @@ class NewsBot:
         )
         self.scheduler.start()
         logger.info(f"✅ Планировщик запущен, проверка каждые {CHECK_INTERVAL} сек")
-        logger.info(f"🕒 Следующая проверка: через {CHECK_INTERVAL} секунд")
         
         # Держим бота запущенным
         try:
             while True:
                 await asyncio.sleep(60)
-                # Каждую минуту просто проверяем, что бот жив
-                logger.debug("Бот работает...")
         except KeyboardInterrupt:
             logger.info("🛑 Бот остановлен пользователем")
-        except Exception as e:
-            logger.error(f"🔥 Критическая ошибка: {e}")
 
 async def main():
     """Точка входа"""
