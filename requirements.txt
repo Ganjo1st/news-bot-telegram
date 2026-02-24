@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
 feedparser==6.0.10
-googletrans==4.0.0rc1
+deep-translator==1.11.4
 APScheduler==3.10.4
