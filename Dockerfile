@@ -6,6 +6,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
-COPY sent_links.json .
+# sent_links.json создастся автоматически
 
 CMD ["python", "bot.py"]
