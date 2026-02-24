@@ -1,6 +1,7 @@
 """
-🤖 Telegram News Bot - Версия 5.0
-ПОЛНЫЕ СТАТЬИ + КАРТИНКИ + ИСПРАВЛЕННЫЙ ПАРСИНГ + БЕЗОПАСНЫЙ ТАЙМИНГ
+🤖 Telegram News Bot - Версия 6.0
+ИНДИВИДУАЛЬНЫЕ ПАРСЕРЫ ДЛЯ КАЖДОГО САЙТА
+ПОЛНЫЕ СТАТЬИ БЕЗ ОБРЫВАНИЯ
 """
 
 import os
@@ -11,7 +12,7 @@ import html
 import requests
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Bot, InputMediaPhoto
+from telegram import Bot
 from telegram.error import TelegramError
 from deep_translator import GoogleTranslator
 import asyncio
@@ -21,6 +22,8 @@ from newspaper import Article
 import tempfile
 from urllib.parse import urljoin, urlparse
 import aiohttp
+import trafilatura
+from readability import Document
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,32 +35,32 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
-CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '21600'))  # 6 часов (безопасно!)
-MIN_POST_INTERVAL = 600  # Минимум 10 минут между постами
-MAX_POSTS_PER_DAY = 24   # Максимум постов в день
+CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '21600'))  # 6 часов
+MIN_POST_INTERVAL = 600  # 10 минут между постами
+MAX_POSTS_PER_DAY = 24
 
-# RSS источники
+# RSS источники с индивидуальными настройками
 RSS_FEEDS = [
     {
         'name': 'Global Research',
         'url': 'https://www.globalresearch.ca/feed',
         'enabled': True,
-        'needs_full': True,
-        'content_selector': 'article, .entry-content, .post-content'
+        'parser': 'globalresearch',  # Индивидуальный парсер
+        'domain': 'globalresearch.ca'
     },
     {
         'name': 'InfoBrics',
         'url': 'https://infobrics.org/rss/en',
         'enabled': True,
-        'needs_full': True,
-        'content_selector': 'article, .post-content, .content'  # Специально для InfoBrics
+        'parser': 'infobrics',  # Индивидуальный парсер
+        'domain': 'infobrics.org'
     },
     {
         'name': 'RT News',
         'url': 'https://www.rt.com/rss/news',
         'enabled': True,
-        'needs_full': True,
-        'content_selector': '.article__text, .article-content, .content'
+        'parser': 'rt',  # Индивидуальный парсер
+        'domain': 'rt.com'
     }
 ]
 
@@ -66,7 +69,6 @@ POSTS_LOG_FILE = 'posts_log.json'
 
 class NewsBot:
     def __init__(self):
-        # Создаем файлы если их нет
         for file in [SENT_LINKS_FILE, POSTS_LOG_FILE]:
             if not os.path.exists(file):
                 with open(file, 'w', encoding='utf-8') as f:
@@ -81,7 +83,6 @@ class NewsBot:
         self.last_post_time = None
     
     def load_json(self, filename):
-        """Загрузка JSON файла"""
         try:
             with open(filename, 'r', encoding='utf-8') as f:
                 return set(json.load(f)) if filename == SENT_LINKS_FILE else json.load(f)
@@ -89,7 +90,6 @@ class NewsBot:
             return set() if filename == SENT_LINKS_FILE else []
     
     def save_json(self, filename, data):
-        """Сохранение JSON файла"""
         with open(filename, 'w', encoding='utf-8') as f:
             if isinstance(data, set):
                 json.dump(list(data), f, ensure_ascii=False, indent=2)
@@ -97,35 +97,28 @@ class NewsBot:
                 json.dump(data, f, ensure_ascii=False, indent=2)
     
     def can_post_now(self):
-        """Проверка, можно ли публиковать сейчас (защита от спама)"""
+        """Проверка лимитов"""
         if not self.posts_log:
             return True
         
-        # Проверяем последний пост
         last_post = max(self.posts_log, key=lambda x: x['time']) if self.posts_log else None
         if last_post:
             last_time = datetime.fromisoformat(last_post['time'])
             if datetime.now() - last_time < timedelta(seconds=MIN_POST_INTERVAL):
                 return False
         
-        # Проверяем лимит за день
         today = datetime.now().date()
         today_posts = [p for p in self.posts_log 
                       if datetime.fromisoformat(p['time']).date() == today]
         
-        if len(today_posts) >= MAX_POSTS_PER_DAY:
-            return False
-        
-        return True
+        return len(today_posts) < MAX_POSTS_PER_DAY
     
     def log_post(self, link, title):
-        """Логирование поста"""
         self.posts_log.append({
             'link': link,
             'title': title[:50],
             'time': datetime.now().isoformat()
         })
-        # Оставляем только последние 100 записей
         if len(self.posts_log) > 100:
             self.posts_log = self.posts_log[-100:]
         self.save_json(POSTS_LOG_FILE, self.posts_log)
@@ -136,7 +129,7 @@ class NewsBot:
         return self.session
     
     def clean_text(self, text):
-        """Очистка текста от мусора"""
+        """Очистка текста"""
         if not text:
             return ""
         
@@ -146,101 +139,171 @@ class NewsBot:
         # Удаляем HTML теги
         text = re.sub(r'<[^>]+>', '', text)
         
-        # Удаляем множественные переносы строк
+        # Нормализуем переносы строк
         text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
-        
-        # Удаляем лишние пробелы
         text = re.sub(r' +', ' ', text)
-        
-        # Удаляем мусорные символы
-        text = re.sub(r'[^\x00-\x7Fа-яА-ЯёЁ\s\.,!?:;"\'()\[\]-]', '', text)
         
         return text.strip()
     
-    def extract_main_content(self, soup, selectors):
-        """Извлечение основного контента по селекторам"""
-        for selector in selectors:
-            content = soup.select_one(selector)
-            if content:
-                return content
-        return None
+    # ========== ИНДИВИДУАЛЬНЫЕ ПАРСЕРЫ ==========
     
-    def extract_full_article(self, url, feed_config):
-        """Извлечение полной статьи с правильными селекторами"""
+    def parse_globalresearch(self, url):
+        """Парсер для Global Research"""
         try:
-            logger.info(f"📰 Извлекаю: {url}")
+            logger.info(f"🌐 Парсинг Global Research: {url}")
             
-            # Пробуем через newspaper3k
-            try:
-                article = Article(url)
-                article.download()
-                article.parse()
-                
-                if article.text and len(article.text) > 200:
-                    logger.info(f"✅ Newspaper: {len(article.text)} символов")
-                    return {
-                        'title': article.title,
-                        'text': self.clean_text(article.text),
-                        'image': article.top_image
-                    }
-            except:
-                pass
+            # Пробуем trafilatura (лучший для текста)
+            downloaded = trafilatura.fetch_url(url)
+            if downloaded:
+                text = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+                if text and len(text) > 500:
+                    logger.info(f"✅ Trafilatura: {len(text)} символов")
+                    return text
             
-            # Если не получилось, используем BeautifulSoup
+            # Запасной вариант через readability
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                doc = Document(response.text)
+                content_html = doc.summary()
+                soup = BeautifulSoup(content_html, 'html.parser')
+                text = soup.get_text(separator='\n\n', strip=True)
+                if text and len(text) > 500:
+                    logger.info(f"✅ Readability: {len(text)} символов")
+                    return text
             
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка Global Research: {e}")
+            return None
+    
+    def parse_infobrics(self, url):
+        """Специальный парсер для InfoBrics"""
+        try:
+            logger.info(f"🌐 Парсинг InfoBrics: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 return None
             
             soup = BeautifulSoup(response.text, 'lxml')
             
-            # Удаляем ненужные элементы
-            for element in soup.find_all(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+            # Удаляем ВСЕ элементы навигации
+            for element in soup.find_all(['nav', 'header', 'footer', 'aside']):
                 element.decompose()
             
-            # Ищем заголовок
-            title_tag = soup.find('h1')
-            title = title_tag.get_text(strip=True) if title_tag else "Без заголовка"
+            # Удаляем все элементы с классами содержащими menu, nav, sidebar, widget
+            for element in soup.find_all(class_=re.compile(r'(menu|nav|sidebar|widget|header|footer|banner|ad|comment)', re.I)):
+                element.decompose()
             
-            # Ищем основной контент
-            selectors = feed_config.get('content_selector', 'article, .content, main').split(', ')
-            content = self.extract_main_content(soup, selectors)
+            # Ищем основной контент - специфично для InfoBrics
+            content = None
             
+            # 1. Пробуем найти article
+            article = soup.find('article')
+            if article:
+                content = article
+            
+            # 2. Пробуем div с классом content
             if not content:
-                # Если не нашли, берем body
+                content = soup.find('div', class_=re.compile(r'content', re.I))
+            
+            # 3. Пробуем main
+            if not content:
+                content = soup.find('main')
+            
+            # 4. Если ничего не нашли, берем body
+            if not content:
                 content = soup.body
             
             if content:
-                # Удаляем лишние элементы из контента
-                for element in content.find_all(['div', 'section'], class_=re.compile(r'(sidebar|menu|nav|footer|header|comment)')):
-                    element.decompose()
+                # Удаляем все ссылки навигации внутри контента
+                for link in content.find_all('a', href=re.compile(r'(category|tag|archive|author)', re.I)):
+                    link.decompose()
                 
                 # Получаем текст
                 text = content.get_text(separator='\n\n', strip=True)
-                text = self.clean_text(text)
                 
-                # Ищем изображение
-                image = None
-                img_tag = content.find('img')
-                if img_tag and img_tag.get('src'):
-                    img_url = img_tag['src']
-                    if not img_url.startswith('http'):
-                        parsed = urlparse(url)
-                        base = f"{parsed.scheme}://{parsed.netloc}"
-                        img_url = urljoin(base, img_url)
-                    image = img_url
+                # Находим начало статьи (обычно после заголовка)
+                lines = text.split('\n\n')
+                filtered_lines = []
                 
-                return {
-                    'title': title,
-                    'text': text[:4000],  # Ограничиваем для перевода
-                    'image': image
-                }
+                for line in lines:
+                    # Пропускаем строки с навигацией
+                    if re.search(r'(Home|About|Contact|Subscribe|Follow us|Share this|Tags|Categories)', line, re.I):
+                        continue
+                    # Пропускаем короткие строки (менее 30 символов) в начале
+                    if len(filtered_lines) < 3 and len(line) < 30:
+                        continue
+                    filtered_lines.append(line)
+                
+                result = '\n\n'.join(filtered_lines)
+                
+                if len(result) > 300:
+                    logger.info(f"✅ InfoBrics: {len(result)} символов")
+                    return result
             
             return None
             
         except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
+            logger.error(f"❌ Ошибка InfoBrics: {e}")
+            return None
+    
+    def parse_rt(self, url):
+        """Парсер для RT"""
+        try:
+            logger.info(f"🌐 Парсинг RT: {url}")
+            
+            # Для RT хорошо работает newspaper3k
+            article = Article(url)
+            article.download()
+            article.parse()
+            
+            if article.text and len(article.text) > 300:
+                logger.info(f"✅ RT: {len(article.text)} символов")
+                return article.text
+            
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка RT: {e}")
+            return None
+    
+    def get_parser(self, parser_name):
+        """Возвращает функцию парсера по имени"""
+        parsers = {
+            'globalresearch': self.parse_globalresearch,
+            'infobrics': self.parse_infobrics,
+            'rt': self.parse_rt
+        }
+        return parsers.get(parser_name, self.parse_globalresearch)
+    
+    def extract_article_text(self, url, feed_config):
+        """Извлечение текста статьи через соответствующий парсер"""
+        try:
+            parser_name = feed_config.get('parser', 'globalresearch')
+            parser_func = self.get_parser(parser_name)
+            
+            # Запускаем парсер
+            text = parser_func(url)
+            
+            if text:
+                # Очищаем текст
+                text = self.clean_text(text)
+                
+                # НЕ обрезаем текст, а разбиваем на части если нужно
+                return text
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка извлечения: {e}")
             return None
     
     async def fetch_news_from_feed(self, feed_config):
@@ -249,7 +312,7 @@ class NewsBot:
             feed_url = feed_config['url']
             source_name = feed_config['name']
             
-            logger.info(f"🔄 {source_name}")
+            logger.info(f"🔄 {source_name}: {feed_url}")
             
             feed = feedparser.parse(feed_url)
             
@@ -262,26 +325,36 @@ class NewsBot:
                 link = entry.get('link', '')
                 
                 if link in self.sent_links:
+                    logger.info(f"⏭️ Уже было: {link[:50]}...")
                     continue
                 
-                # Получаем полную статью
+                # Получаем полный текст статьи
                 loop = asyncio.get_event_loop()
-                article_data = await loop.run_in_executor(
+                full_text = await loop.run_in_executor(
                     None, 
-                    self.extract_full_article, 
+                    self.extract_article_text, 
                     link, 
                     feed_config
                 )
                 
-                if article_data and article_data.get('text'):
+                if full_text and len(full_text) > 200:
+                    # Получаем заголовок из RSS или из текста
+                    title = entry.get('title', '')
+                    
+                    # Ищем изображение (пока пропускаем, добавим позже)
+                    image = None
+                    
                     news_items.append({
                         'source': source_name,
-                        'title': article_data.get('title', entry.get('title', '')),
-                        'content': article_data.get('text', ''),
+                        'title': title,
+                        'content': full_text,
                         'link': link,
-                        'image': article_data.get('image')
+                        'image': image
                     })
-                    logger.info(f"📰 Добавлено: {article_data.get('title', '')[:50]}...")
+                    
+                    logger.info(f"📰 Добавлено: {title[:50]}... ({len(full_text)} символов)")
+                else:
+                    logger.warning(f"⚠️ Не удалось извлечь текст для {link}")
             
             return news_items
             
@@ -290,14 +363,14 @@ class NewsBot:
             return []
     
     async def fetch_all_news(self):
-        """Сбор новостей из всех источников"""
+        """Сбор новостей"""
         all_news = []
         
         for feed in RSS_FEEDS:
             if feed['enabled']:
                 news = await self.fetch_news_from_feed(feed)
                 all_news.extend(news)
-                await asyncio.sleep(10)  # Пауза между источниками
+                await asyncio.sleep(10)
         
         # Удаляем дубликаты
         unique = []
@@ -310,150 +383,182 @@ class NewsBot:
         logger.info(f"📊 Найдено новых: {len(unique)}")
         return unique
     
+    def split_long_text(self, text, max_length=4000):
+        """Разбивает длинный текст на части для Telegram"""
+        if len(text) <= max_length:
+            return [text]
+        
+        parts = []
+        paragraphs = text.split('\n\n')
+        current_part = ""
+        
+        for para in paragraphs:
+            if len(current_part) + len(para) + 2 <= max_length:
+                if current_part:
+                    current_part += "\n\n" + para
+                else:
+                    current_part = para
+            else:
+                if current_part:
+                    parts.append(current_part)
+                # Если один параграф слишком длинный, разбиваем его
+                if len(para) > max_length:
+                    words = para.split()
+                    temp = ""
+                    for word in words:
+                        if len(temp) + len(word) + 1 <= max_length:
+                            if temp:
+                                temp += " " + word
+                            else:
+                                temp = word
+                        else:
+                            parts.append(temp)
+                            temp = word
+                    if temp:
+                        current_part = temp
+                    else:
+                        current_part = ""
+                else:
+                    current_part = para
+        
+        if current_part:
+            parts.append(current_part)
+        
+        return parts
+    
     def translate_text(self, text):
-        """Перевод текста"""
+        """Перевод текста с сохранением структуры"""
         try:
             if not text or len(text) < 20:
                 return text
             
-            # Переводим по частям если длинный текст
-            if len(text) > 4000:
-                parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-                translated_parts = []
-                for part in parts[:3]:  # Максимум 3 части
-                    translated_parts.append(self.translator.translate(part))
-                return ' '.join(translated_parts)
+            # Разбиваем на абзацы для перевода
+            paragraphs = text.split('\n\n')
+            translated_paragraphs = []
             
-            return self.translator.translate(text)
+            for para in paragraphs:
+                if para.strip():
+                    # Если абзац слишком длинный, разбиваем его
+                    if len(para) > 4000:
+                        sub_paras = [para[i:i+4000] for i in range(0, len(para), 4000)]
+                        translated_sub = []
+                        for sub in sub_paras:
+                            try:
+                                translated_sub.append(self.translator.translate(sub))
+                            except:
+                                translated_sub.append(sub)
+                        translated_paragraphs.append(' '.join(translated_sub))
+                    else:
+                        try:
+                            translated_paragraphs.append(self.translator.translate(para))
+                        except:
+                            translated_paragraphs.append(para)
+                else:
+                    translated_paragraphs.append('')
+            
+            return '\n\n'.join(translated_paragraphs)
             
         except Exception as e:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
     
-    async def create_post_with_image(self, news_item):
-        """Создание поста с изображением"""
+    async def create_post(self, news_item):
+        """Создание поста (возможно несколько сообщений)"""
         try:
             loop = asyncio.get_event_loop()
             
             # Переводим
+            logger.info(f"🔄 Перевод статьи {len(news_item['content'])} символов...")
+            translated = await loop.run_in_executor(None, self.translate_text, news_item['content'])
+            
+            # Разбиваем на части если нужно
+            parts = self.split_long_text(translated)
+            
+            posts = []
+            
+            # Первая часть с заголовком
             title_ru = await loop.run_in_executor(None, self.translate_text, news_item['title'])
-            content_ru = await loop.run_in_executor(None, self.translate_text, news_item['content'])
+            first_part = f"<b>{title_ru}</b>\n\n{parts[0]}"
             
-            # Формируем текст
-            post_text = f"<b>{title_ru}</b>\n\n"
+            # Добавляем ссылку на источник в конец первой части
+            first_part += f"\n\n📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
             
-            if content_ru:
-                paragraphs = content_ru.split('\n\n')
-                for para in paragraphs[:10]:
-                    if para.strip():
-                        post_text += f"{para.strip()}\n\n"
-            
-            post_text += f"📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
-            
-            # Ограничиваем длину
-            if len(post_text) > 4000:
-                post_text = post_text[:4000] + "...\n\n📰 <a href='{news_item['link']}'>Читать оригинал</a>"
-            
-            # Если есть изображение
-            if news_item['image']:
-                try:
-                    image_path = await self.download_image(news_item['image'])
-                    if image_path:
-                        return {
-                            'type': 'photo',
-                            'path': image_path,
-                            'caption': post_text
-                        }
-                except:
-                    pass
-            
-            return {
+            posts.append({
                 'type': 'text',
-                'text': post_text
-            }
+                'text': first_part
+            })
+            
+            # Остальные части
+            for part in parts[1:]:
+                posts.append({
+                    'type': 'text',
+                    'text': part
+                })
+            
+            logger.info(f"📦 Создано {len(posts)} частей")
+            return posts
             
         except Exception as e:
-            logger.error(f"❌ Ошибка создания: {e}")
-            return None
-    
-    async def download_image(self, url):
-        """Скачивание изображения"""
-        try:
-            if not url:
-                return None
-            
-            fd, path = tempfile.mkstemp(suffix='.jpg')
-            os.close(fd)
-            
-            session = await self.get_session()
-            async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    with open(path, 'wb') as f:
-                        f.write(await response.read())
-                    return path
-            return None
-        except:
+            logger.error(f"❌ Ошибка создания поста: {e}")
             return None
     
     async def publish_post(self, post_data):
-        """Публикация поста"""
+        """Публикация одного сообщения"""
         try:
-            if post_data['type'] == 'photo':
-                with open(post_data['path'], 'rb') as photo:
-                    await self.bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=photo,
-                        caption=post_data['caption'],
-                        parse_mode='HTML'
-                    )
-                os.unlink(post_data['path'])
-            else:
-                await self.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=post_data['text'],
-                    parse_mode='HTML',
-                    disable_web_page_preview=False
-                )
-            
-            logger.info("✅ Пост опубликован")
+            await self.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=post_data['text'],
+                parse_mode='HTML',
+                disable_web_page_preview=False
+            )
             return True
-            
         except TelegramError as e:
             if "Too Many Requests" in str(e):
-                logger.warning("⚠️ Слишком много запросов, жду 1 час...")
+                logger.warning("⚠️ Лимит Telegram, жду 1 час...")
                 await asyncio.sleep(3600)
             else:
                 logger.error(f"❌ Ошибка: {e}")
             return False
     
     async def check_and_publish(self):
-        """Основной цикл с защитой от спама"""
+        """Основной цикл"""
+        logger.info("=" * 60)
         logger.info("🔍 ПРОВЕРКА НОВОСТЕЙ")
+        logger.info("=" * 60)
         
-        # Проверяем лимиты
         if not self.can_post_now():
-            logger.info("⏳ Достигнут лимит постов, пропускаю")
+            logger.info("⏳ Достигнут лимит постов")
             return
         
-        # Собираем новости
         news_items = await self.fetch_all_news()
         
         if not news_items:
+            logger.info("📭 Новых статей нет")
             return
         
         published = 0
         
-        # Публикуем
         for item in news_items:
-            # Проверяем лимиты перед каждым постом
             if not self.can_post_now():
-                logger.info("⏳ Достигнут лимит, останавливаюсь")
+                logger.info("⏳ Лимит достигнут, останавливаюсь")
                 break
             
-            post = await self.create_post_with_image(item)
+            logger.info(f"\n📝 Публикую: {item['title']}")
             
-            if post:
-                success = await self.publish_post(post)
+            posts = await self.create_post(item)
+            
+            if posts:
+                success = True
+                for i, post in enumerate(posts, 1):
+                    if not success:
+                        break
+                    
+                    logger.info(f"📎 Часть {i}/{len(posts)}")
+                    success = await self.publish_post(post)
+                    
+                    if success and i < len(posts):
+                        logger.info("⏱ Пауза 5 секунд между частями...")
+                        await asyncio.sleep(5)
                 
                 if success:
                     self.sent_links.add(item['link'])
@@ -461,23 +566,21 @@ class NewsBot:
                     self.log_post(item['link'], item['title'])
                     published += 1
                     
-                    # Пауза между постами
                     if published < len(news_items):
-                        logger.info(f"⏱ Пауза {MIN_POST_INTERVAL//60} минут...")
+                        logger.info(f"⏱ Пауза {MIN_POST_INTERVAL//60} минут до следующей статьи...")
                         await asyncio.sleep(MIN_POST_INTERVAL)
         
-        logger.info(f"📊 Опубликовано: {published}")
+        logger.info(f"\n📊 Опубликовано статей: {published}")
     
     async def start(self):
-        """Запуск бота"""
+        """Запуск"""
         logger.info("=" * 60)
-        logger.info("🚀 NEWS BOT 5.0 - БЕЗОПАСНЫЙ РЕЖИМ")
+        logger.info("🚀 NEWS BOT 6.0 - ПОЛНЫЕ СТАТЬИ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"⏱ Интервал: {CHECK_INTERVAL//3600}ч")
-        logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
+        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
+        logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} статей/день")
         logger.info("=" * 60)
         
-        # Проверяем бота
         try:
             me = await self.bot.get_me()
             logger.info(f"✅ Бот @{me.username}")
@@ -485,10 +588,8 @@ class NewsBot:
             logger.error(f"❌ Ошибка: {e}")
             return
         
-        # Первый запуск
         await self.check_and_publish()
         
-        # Планировщик
         self.scheduler.add_job(
             self.check_and_publish,
             'interval',
@@ -496,7 +597,6 @@ class NewsBot:
         )
         self.scheduler.start()
         
-        # Держим запущенным
         try:
             while True:
                 await asyncio.sleep(60)
