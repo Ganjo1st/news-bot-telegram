@@ -1,19 +1,18 @@
 """
 🤖 Telegram News Bot - Мультиисточник
 Безопасный бот для публикации новостей из нескольких RSS
-Версия 2.1 - с автосозданием файла
+Версия 2.2 - с deep-translator (без конфликтов)
 """
 
 import os
 import logging
 import feedparser
-import html
 import re
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from telegram.error import TelegramError
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 import asyncio
 import json
 
@@ -60,7 +59,7 @@ class NewsBot:
                 json.dump([], f)
         
         self.bot = Bot(token=TELEGRAM_TOKEN)
-        self.translator = Translator()
+        self.translator = GoogleTranslator(source='en', target='ru')
         self.scheduler = AsyncIOScheduler()
         self.sent_links = self.load_sent_links()
         
@@ -133,15 +132,11 @@ class NewsBot:
                 elif hasattr(entry, 'content'):
                     description = self.clean_html(entry.content[0].value)
                 
-                # Получаем дату
-                published = entry.get('published', '')
-                
                 news_items.append({
                     'source': source_name,
                     'title': title,
                     'description': description[:500],  # Обрезаем для перевода
                     'link': link,
-                    'published': published
                 })
             
             logger.info(f"📰 {source_name}: найдено новых {len(news_items)}")
@@ -165,24 +160,26 @@ class NewsBot:
         logger.info(f"📊 Всего новых новостей: {len(all_news)}")
         return all_news
     
-    async def translate_text(self, text):
-        """Перевод текста на русский"""
+    def translate_text(self, text):
+        """Перевод текста на русский (синхронный)"""
         try:
             if not text or len(text.strip()) < 10:
                 return text
             
             # Ограничиваем длину для перевода
-            if len(text) > 3000:
-                text = text[:3000] + "..."
+            if len(text) > 4000:
+                text = text[:4000] + "..."
             
-            # Используем Google Translate
-            translated = await self.translator.translate(text, dest='ru', src='en')
+            # Используем deep-translator
+            translated = self.translator.translate(text)
             
             # Экранируем специальные символы для Telegram HTML
-            result = translated.text
-            result = result.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            if translated:
+                result = translated
+                result = result.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                return result
             
-            return result
+            return text
             
         except Exception as e:
             logger.error(f"❌ Ошибка перевода: {e}")
@@ -192,9 +189,10 @@ class NewsBot:
     async def create_post_text(self, news_item):
         """Создание текста поста"""
         try:
-            # Переводим заголовок и текст
-            title_ru = await self.translate_text(news_item['title'])
-            description_ru = await self.translate_text(news_item['description'])
+            # Переводим заголовок и текст (в потоке чтобы не блокировать)
+            loop = asyncio.get_event_loop()
+            title_ru = await loop.run_in_executor(None, self.translate_text, news_item['title'])
+            description_ru = await loop.run_in_executor(None, self.translate_text, news_item['description'])
             
             # Формируем пост
             post = f"<b>{title_ru}</b>\n\n"
@@ -223,7 +221,7 @@ class NewsBot:
                 chat_id=CHANNEL_ID,
                 text=post_text,
                 parse_mode='HTML',
-                disable_web_page_preview=False  # Показываем превью ссылки
+                disable_web_page_preview=False
             )
             logger.info(f"✅ Пост опубликован в {CHANNEL_ID}")
             return True
@@ -261,8 +259,9 @@ class NewsBot:
                     published_count += 1
                     
                     # Пауза между постами (чтобы не спамить)
-                    logger.info(f"⏱ Ожидание 2 минуты перед следующим постом...")
-                    await asyncio.sleep(120)  # 2 минуты
+                    if len(news_items) > 1 and published_count < len(news_items):
+                        logger.info(f"⏱ Ожидание 2 минуты перед следующим постом...")
+                        await asyncio.sleep(120)  # 2 минуты
             else:
                 logger.warning(f"⚠️ Не удалось создать пост для {item['link']}")
         
@@ -299,8 +298,7 @@ class NewsBot:
             self.check_and_publish,
             'interval',
             seconds=CHECK_INTERVAL,
-            id='news_checker',
-            next_run_time=datetime.now()  # Запускаем сразу
+            id='news_checker'
         )
         self.scheduler.start()
         logger.info(f"✅ Планировщик запущен, проверка каждые {CHECK_INTERVAL} сек")
