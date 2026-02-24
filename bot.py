@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Мультиисточник
-Версия 3.0 - с полными статьями и без дублей
+🤖 Telegram News Bot - Версия 4.0
+ПОЛНЫЕ СТАТЬИ + КАРТИНКИ
 """
 
 import os
@@ -11,12 +11,16 @@ import html
 import requests
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Bot
+from telegram import Bot, InputMediaPhoto
 from telegram.error import TelegramError
 from deep_translator import GoogleTranslator
 import asyncio
 import json
-from bs4 import BeautifulSoup  # Новая библиотека для парсинга
+from bs4 import BeautifulSoup
+from newspaper import Article  # Для извлечения статей
+import tempfile
+from urllib.parse import urljoin, urlparse
+import aiohttp
 
 # Настройка логирования
 logging.basicConfig(
@@ -25,38 +29,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация из переменных окружения
+# Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
-CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '7200'))  # 2 часа
+CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '10800'))  # 3 часа
 
-# Несколько RSS источников
+# RSS источники
 RSS_FEEDS = [
     {
         'name': 'Global Research',
         'url': 'https://www.globalresearch.ca/feed',
-        'enabled': True
+        'enabled': True,
+        'needs_full': True  # Нужно загружать полную статью
     },
     {
         'name': 'InfoBrics',
         'url': 'https://infobrics.org/rss/en',
-        'enabled': True
+        'enabled': True,
+        'needs_full': True
     },
     {
         'name': 'RT News',
         'url': 'https://www.rt.com/rss/news',
-        'enabled': True
+        'enabled': True,
+        'needs_full': True
     }
 ]
 
-# Файл для хранения отправленных ссылок
 SENT_LINKS_FILE = 'sent_links.json'
 
 class NewsBot:
     def __init__(self):
-        # СОЗДАЕМ ФАЙЛ АВТОМАТИЧЕСКИ
         if not os.path.exists(SENT_LINKS_FILE):
-            logger.info(f"📁 Создаю файл {SENT_LINKS_FILE}")
             with open(SENT_LINKS_FILE, 'w', encoding='utf-8') as f:
                 json.dump([], f)
         
@@ -64,208 +68,283 @@ class NewsBot:
         self.translator = GoogleTranslator(source='en', target='ru')
         self.scheduler = AsyncIOScheduler()
         self.sent_links = self.load_sent_links()
-        
+        self.session = None
+    
+    async def get_session(self):
+        """Получение aiohttp сессии"""
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+        return self.session
+    
     def load_sent_links(self):
-        """Загружает список отправленных ссылок из файла"""
         try:
-            if os.path.exists(SENT_LINKS_FILE):
-                with open(SENT_LINKS_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    logger.info(f"📂 Загружено {len(data)} отправленных ссылок")
-                    return set(data)
-        except Exception as e:
-            logger.error(f"Ошибка загрузки sent_links: {e}")
-        return set()
+            with open(SENT_LINKS_FILE, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except:
+            return set()
     
     def save_sent_links(self):
-        """Сохраняет список отправленных ссылок в файл"""
-        try:
-            with open(SENT_LINKS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(list(self.sent_links), f, ensure_ascii=False, indent=2)
-            logger.info(f"💾 Сохранено {len(self.sent_links)} ссылок")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения sent_links: {e}")
+        with open(SENT_LINKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(self.sent_links), f, ensure_ascii=False, indent=2)
     
-    def clean_html(self, text):
-        """Удаляет HTML теги и декодирует спецсимволы"""
+    def clean_text(self, text):
+        """Очистка текста от мусора"""
         if not text:
             return ""
         
-        # Декодируем HTML entities (&#8230; → ...)
+        # Декодируем HTML entities
         text = html.unescape(text)
         
         # Удаляем HTML теги
         text = re.sub(r'<[^>]+>', '', text)
         
-        # Удаляем лишние пробелы и переносы
-        text = re.sub(r'\s+', ' ', text)
+        # Удаляем множественные переносы строк
+        text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
         
-        # Удаляем CDATA
-        text = re.sub(r'<!\[CDATA\[|\]\]>', '', text)
+        # Удаляем лишние пробелы
+        text = re.sub(r' +', ' ', text)
         
-        # Удаляем странные символы, оставляем только нормальный текст
-        text = re.sub(r'[^\x00-\x7Fа-яА-ЯёЁ\s\.,!?:;()-]', '', text)
+        # Удаляем мусорные символы
+        text = re.sub(r'[^\x00-\x7Fа-яА-ЯёЁ\s\.,!?:;"\'()\[\]-]', '', text)
         
         return text.strip()
     
-    def fetch_full_article(self, url):
-        """Получает полный текст статьи со страницы"""
+    async def download_image(self, url):
+        """Скачивание изображения"""
         try:
-            logger.info(f"📄 Загружаю полную статью: {url}")
+            if not url:
+                return None
             
+            # Создаем временный файл
+            fd, path = tempfile.mkstemp(suffix='.jpg')
+            os.close(fd)
+            
+            # Скачиваем изображение
+            session = await self.get_session()
+            async with session.get(url) as response:
+                if response.status == 200:
+                    with open(path, 'wb') as f:
+                        f.write(await response.read())
+                    return path
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка скачивания изображения: {e}")
+            return None
+    
+    def extract_full_article(self, url):
+        """Извлечение полной статьи с помощью newspaper3k"""
+        try:
+            logger.info(f"📰 Извлекаю полную статью: {url}")
+            
+            # Создаем объект Article
+            article = Article(url)
+            
+            # Загружаем и парсим
+            article.download()
+            article.parse()
+            
+            # Получаем данные
+            title = article.title
+            text = article.text
+            top_image = article.top_image
+            
+            # Если нет текста, пробуем через BeautifulSoup
+            if not text or len(text) < 100:
+                logger.info("🔄 Пробую альтернативный метод...")
+                return self.extract_with_soup(url)
+            
+            # Очищаем текст
+            text = self.clean_text(text)
+            
+            # Ограничиваем длину
+            if len(text) > 4000:
+                text = text[:4000] + "..."
+            
+            logger.info(f"✅ Получено {len(text)} символов, изображение: {top_image}")
+            
+            return {
+                'title': title,
+                'text': text,
+                'image': top_image
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка извлечения статьи: {e}")
+            return self.extract_with_soup(url)
+    
+    def extract_with_soup(self, url):
+        """Запасной метод через BeautifulSoup"""
+        try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Удаляем ненужные элементы
-                for element in soup.find_all(['script', 'style', 'nav', 'header', 'footer']):
-                    element.decompose()
-                
-                # Ищем основной контент (разные селекторы для разных сайтов)
-                content = None
-                
-                # Для Global Research
-                if 'globalresearch' in url:
-                    content = soup.find('div', class_='entry-content')
-                    if not content:
-                        content = soup.find('article')
-                
-                # Для InfoBrics
-                elif 'infobrics' in url:
-                    content = soup.find('div', class_='post-content')
-                    if not content:
-                        content = soup.find('div', class_='content')
-                
-                # Для RT
-                elif 'rt.com' in url:
-                    content = soup.find('div', class_='article__text')
-                    if not content:
-                        content = soup.find('div', class_='article-content')
-                
-                # Если нашли контент
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                return None
+            
+            soup = BeautifulSoup(response.text, 'lxml')
+            
+            # Удаляем ненужное
+            for element in soup.find_all(['script', 'style', 'nav', 'footer', 'header']):
+                element.decompose()
+            
+            # Ищем заголовок
+            title = None
+            title_tag = soup.find('h1')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+            
+            # Ищем контент
+            content = None
+            
+            # Пробуем разные селекторы
+            selectors = [
+                'article',
+                '.post-content',
+                '.entry-content',
+                '.article-content',
+                '.content',
+                'main',
+                '#content'
+            ]
+            
+            for selector in selectors:
+                content = soup.select_one(selector)
                 if content:
-                    # Получаем текст
-                    text = content.get_text(separator='\n\n', strip=True)
-                    
-                    # Ограничиваем длину
-                    if len(text) > 3000:
-                        text = text[:3000] + "..."
-                    
-                    logger.info(f"✅ Получено {len(text)} символов")
-                    return text
-                else:
-                    logger.warning(f"⚠️ Не найден контент на странице")
+                    break
+            
+            if not content:
+                # Берем весь body
+                content = soup.body
+            
+            if content:
+                # Получаем текст
+                text = content.get_text(separator='\n\n', strip=True)
+                text = self.clean_text(text)
+                
+                # Ищем первое изображение
+                image = None
+                img_tag = content.find('img')
+                if img_tag and img_tag.get('src'):
+                    img_url = img_tag['src']
+                    # Преобразуем относительный URL в абсолютный
+                    if not img_url.startswith('http'):
+                        parsed = urlparse(url)
+                        base = f"{parsed.scheme}://{parsed.netloc}"
+                        img_url = urljoin(base, img_url)
+                    image = img_url
+                
+                return {
+                    'title': title or 'Без заголовка',
+                    'text': text[:4000],
+                    'image': image
+                }
             
             return None
             
         except Exception as e:
-            logger.error(f"❌ Ошибка загрузки статьи: {e}")
+            logger.error(f"❌ Ошибка Soup парсинга: {e}")
             return None
     
     async def fetch_news_from_feed(self, feed_config):
-        """Получение новостей из конкретного RSS"""
+        """Получение новостей из RSS"""
         try:
             feed_url = feed_config['url']
             source_name = feed_config['name']
+            needs_full = feed_config.get('needs_full', True)
             
-            logger.info(f"🔄 Проверка {source_name}: {feed_url}")
+            logger.info(f"🔄 {source_name}: {feed_url}")
             
-            # Парсим RSS
             feed = feedparser.parse(feed_url)
             
-            if feed.bozo:  # Ошибка парсинга
-                logger.error(f"❌ Ошибка RSS {source_name}: {feed.bozo_exception}")
+            if feed.bozo:
+                logger.error(f"❌ Ошибка RSS {source_name}")
                 return []
             
             news_items = []
-            for entry in feed.entries[:3]:  # Берем последние 3 из каждого источника
-                # Получаем ссылку
+            for entry in feed.entries[:2]:  # По 2 статьи из каждого источника
                 link = entry.get('link', '')
                 
-                # Пропускаем если уже отправляли (УЛУЧШЕННАЯ ПРОВЕРКА)
                 if link in self.sent_links:
-                    logger.info(f"⏭️ Пропускаем дубль: {link}")
+                    logger.info(f"⏭️ Дубль: {link[:50]}...")
                     continue
                 
-                # Получаем заголовок
-                title = self.clean_html(entry.get('title', 'Без заголовка'))
+                # Заголовок из RSS
+                title = self.clean_text(entry.get('title', ''))
                 
-                # Пробуем получить полную статью
-                full_text = None
-                
-                # Для некоторых источников пробуем загрузить полную статью
-                if 'globalresearch' in link or 'infobrics' in link:
+                # Получаем полную статью если нужно
+                article_data = None
+                if needs_full and link:
                     loop = asyncio.get_event_loop()
-                    full_text = await loop.run_in_executor(None, self.fetch_full_article, link)
+                    article_data = await loop.run_in_executor(None, self.extract_full_article, link)
                 
-                # Если не получили полный текст, используем описание из RSS
-                if not full_text:
+                if article_data and article_data.get('text'):
+                    # Используем данные из полной статьи
+                    final_title = article_data.get('title') or title
+                    final_text = article_data.get('text', '')
+                    final_image = article_data.get('image')
+                else:
+                    # Используем данные из RSS
+                    final_title = title
+                    final_text = ""
                     if hasattr(entry, 'description'):
-                        full_text = self.clean_html(entry.description)
+                        final_text = self.clean_text(entry.description)
                     elif hasattr(entry, 'summary'):
-                        full_text = self.clean_html(entry.summary)
-                    elif hasattr(entry, 'content'):
-                        full_text = self.clean_html(entry.content[0].value)
-                    else:
-                        full_text = ""
+                        final_text = self.clean_text(entry.summary)
+                    final_image = None
                 
                 news_items.append({
                     'source': source_name,
-                    'title': title,
-                    'content': full_text,
+                    'title': final_title,
+                    'content': final_text,
                     'link': link,
+                    'image': final_image
                 })
                 
-                logger.info(f"📰 {source_name}: '{title[:50]}...'")
+                logger.info(f"📰 {source_name}: '{final_title[:50]}...'")
             
-            logger.info(f"📰 {source_name}: найдено новых {len(news_items)}")
             return news_items
             
         except Exception as e:
-            logger.error(f"❌ Ошибка получения новостей из {feed_config['name']}: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return []
     
     async def fetch_all_news(self):
-        """Получение новостей из всех источников"""
+        """Сбор новостей из всех источников"""
         all_news = []
         
-        for feed_config in RSS_FEEDS:
-            if not feed_config.get('enabled', True):
-                continue
-                
-            news = await self.fetch_news_from_feed(feed_config)
-            all_news.extend(news)
+        for feed in RSS_FEEDS:
+            if feed['enabled']:
+                news = await self.fetch_news_from_feed(feed)
+                all_news.extend(news)
+                await asyncio.sleep(5)  # Пауза между источниками
         
-        # Удаляем дубли по ссылкам (на всякий случай)
-        unique_news = []
-        seen_links = set()
-        
+        # Удаляем дубликаты
+        unique = []
+        seen = set()
         for item in all_news:
-            if item['link'] not in seen_links:
-                seen_links.add(item['link'])
-                unique_news.append(item)
+            if item['link'] not in seen:
+                seen.add(item['link'])
+                unique.append(item)
         
-        logger.info(f"📊 Всего уникальных новостей: {len(unique_news)}")
-        return unique_news
+        logger.info(f"📊 Всего уникальных: {len(unique)}")
+        return unique
     
     def translate_text(self, text):
-        """Перевод текста на русский"""
+        """Перевод текста"""
         try:
-            if not text or len(text.strip()) < 10:
+            if not text or len(text) < 20:
                 return text
             
             # Ограничиваем длину для перевода
             if len(text) > 4000:
                 text = text[:4000] + "..."
             
-            # Используем deep-translator
+            # Переводим
             translated = self.translator.translate(text)
             
-            if translated:
+            if translated and len(translated) > 10:
                 return translated
             
             return text
@@ -274,137 +353,156 @@ class NewsBot:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
     
-    async def create_post_text(self, news_item):
-        """Создание текста поста"""
+    async def create_post_with_image(self, news_item):
+        """Создание поста с изображением"""
         try:
-            # Переводим заголовок и текст
             loop = asyncio.get_event_loop()
+            
+            # Переводим заголовок и текст
             title_ru = await loop.run_in_executor(None, self.translate_text, news_item['title'])
             content_ru = await loop.run_in_executor(None, self.translate_text, news_item['content'])
             
-            # Формируем пост
-            post = f"<b>{title_ru}</b>\n\n"
+            # Формируем текст поста
+            post_text = f"<b>{title_ru}</b>\n\n"
             
-            if content_ru and len(content_ru) > 50:
-                # Разбиваем на абзацы для лучшей читаемости
+            if content_ru:
+                # Разбиваем на абзацы для читаемости
                 paragraphs = content_ru.split('\n\n')
-                for para in paragraphs[:5]:  # Максимум 5 абзацев
+                for para in paragraphs[:8]:  # Больше абзацев
                     if para.strip():
-                        post += f"{para.strip()}\n\n"
+                        post_text += f"{para.strip()}\n\n"
             
-            # Добавляем ссылку на источник (ИЗМЕНЕННАЯ ПОДПИСЬ)
-            source_name = news_item['source']
-            post += f"📰 <a href='{news_item['link']}'>Источник: {source_name}</a>"
+            # Добавляем источник
+            post_text += f"📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
             
-            # Telegram лимит: 4096 символов
-            if len(post) > 4000:
-                post = post[:4000] + "...\n\n📰 <a href='{news_item['link']}'>Читать оригинал</a>"
+            # Проверяем длину
+            if len(post_text) > 4000:
+                post_text = post_text[:4000] + "...\n\n📰 <a href='{news_item['link']}'>Читать оригинал</a>"
             
-            return post
+            # Если есть изображение, скачиваем и отправляем с ним
+            if news_item['image']:
+                image_path = await self.download_image(news_item['image'])
+                if image_path:
+                    return {
+                        'type': 'photo',
+                        'path': image_path,
+                        'caption': post_text
+                    }
+            
+            # Если нет изображения - просто текст
+            return {
+                'type': 'text',
+                'text': post_text
+            }
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания поста: {e}")
             return None
     
-    async def publish_post(self, post_text):
-        """Публикация в Telegram канал"""
+    async def publish_post(self, post_data):
+        """Публикация поста в Telegram"""
         try:
-            await self.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=post_text,
-                parse_mode='HTML',
-                disable_web_page_preview=False
-            )
-            logger.info(f"✅ Пост опубликован")
+            if post_data['type'] == 'photo':
+                # Отправляем с фото
+                with open(post_data['path'], 'rb') as photo:
+                    await self.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=photo,
+                        caption=post_data['caption'],
+                        parse_mode='HTML'
+                    )
+                # Удаляем временный файл
+                os.unlink(post_data['path'])
+                logger.info("✅ Пост с фото опубликован")
+                
+            else:
+                # Отправляем текст
+                await self.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=post_data['text'],
+                    parse_mode='HTML',
+                    disable_web_page_preview=False
+                )
+                logger.info("✅ Текстовый пост опубликован")
+            
             return True
             
-        except TelegramError as e:
-            logger.error(f"❌ Ошибка Telegram: {e}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации: {e}")
             return False
     
     async def check_and_publish(self):
-        """Основная функция проверки и публикации"""
-        logger.info("🔍 Запуск проверки новостей из всех источников...")
+        """Основной цикл"""
+        logger.info("🔍 НАЧАЛО ПРОВЕРКИ")
         
-        # Получаем новости
+        # Собираем новости
         news_items = await self.fetch_all_news()
         
         if not news_items:
             logger.info("📭 Новых новостей нет")
             return
         
-        published_count = 0
+        published = 0
         
-        # Обрабатываем каждую новость
+        # Публикуем каждую
         for item in news_items:
-            # Создаем пост
-            post_text = await self.create_post_text(item)
+            post = await self.create_post_with_image(item)
             
-            if post_text:
-                # Публикуем
-                success = await self.publish_post(post_text)
+            if post:
+                success = await self.publish_post(post)
                 
                 if success:
-                    # Запоминаем ссылку
                     self.sent_links.add(item['link'])
                     self.save_sent_links()
-                    published_count += 1
+                    published += 1
                     
                     # Пауза между постами
-                    if len(news_items) > 1 and published_count < len(news_items):
-                        logger.info(f"⏱ Ожидание 3 минуты...")
-                        await asyncio.sleep(180)  # 3 минуты
-            else:
-                logger.warning(f"⚠️ Не удалось создать пост")
+                    if len(news_items) > 1 and published < len(news_items):
+                        logger.info("⏱ Пауза 5 минут...")
+                        await asyncio.sleep(300)  # 5 минут
         
-        logger.info(f"📊 Опубликовано: {published_count} постов")
+        logger.info(f"📊 Опубликовано: {published}")
     
     async def start(self):
         """Запуск бота"""
         logger.info("=" * 60)
-        logger.info("🚀 NEWS BOT 3.0 ЗАПУСКАЕТСЯ")
+        logger.info("🚀 NEWS BOT 4.0 - ПОЛНЫЕ СТАТЬИ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"📡 Источники:")
-        for feed in RSS_FEEDS:
-            if feed['enabled']:
-                logger.info(f"   - {feed['name']}")
+        logger.info(f"📡 Источники: {[f['name'] for f in RSS_FEEDS if f['enabled']]}")
         logger.info("=" * 60)
         
-        # Проверяем подключение к Telegram
+        # Проверяем бота
         try:
             me = await self.bot.get_me()
-            logger.info(f"✅ Бот @{me.username} авторизован")
+            logger.info(f"✅ Бот @{me.username} активен")
         except Exception as e:
-            logger.error(f"❌ Ошибка подключения бота: {e}")
+            logger.error(f"❌ Ошибка бота: {e}")
             return
         
-        # Первая проверка
-        logger.info("🔍 Первая проверка...")
+        # Первый запуск
         await self.check_and_publish()
         
         # Планировщик
         self.scheduler.add_job(
             self.check_and_publish,
             'interval',
-            seconds=CHECK_INTERVAL,
-            id='news_checker'
+            seconds=CHECK_INTERVAL
         )
         self.scheduler.start()
-        logger.info(f"✅ Следующая проверка через {CHECK_INTERVAL//3600} часов")
+        logger.info(f"✅ Следующая проверка через {CHECK_INTERVAL//3600}ч")
         
-        # Держим бота запущенным
+        # Держим запущенным
         try:
             while True:
                 await asyncio.sleep(60)
         except KeyboardInterrupt:
-            logger.info("🛑 Бот остановлен")
+            logger.info("🛑 Остановка")
+            if self.session:
+                await self.session.close()
 
 async def main():
     bot = NewsBot()
     await bot.start()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен")
+    asyncio.run(main())
