@@ -28,12 +28,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
+# Конфигурация - ВРЕМЕННО игнорируем переменную окружения
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
-CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '7200'))  # 2 часа
-MIN_POST_INTERVAL = 600  # 10 минут между постами
-MAX_POSTS_PER_DAY = 24
+CHECK_INTERVAL = 600  # ← ЖЕСТКО ЗАДАЕМ 10 минут (игнорируем переменную)
+MIN_POST_INTERVAL = 120  # 2 минуты между постами
+MAX_POSTS_PER_DAY = 48
 
 # Только InfoBrics
 RSS_FEEDS = [
