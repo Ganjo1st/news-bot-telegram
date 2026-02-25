@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 7.4
-С РАСШИРЕННЫМ ЛОГИРОВАНИЕМ
+🤖 Telegram News Bot - Версия 7.5
+ИСПРАВЛЕНО: дублирование заголовков + картинки между частями
 """
 
 import os
@@ -21,7 +21,7 @@ import tempfile
 from urllib.parse import urljoin, urlparse
 import aiohttp
 
-# Настройка логирования с более подробным форматом
+# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -54,12 +54,10 @@ TELEGRAM_MAX_MESSAGE = 4096
 
 class NewsBot:
     def __init__(self):
-        # Создаем файлы если их нет
         for file in [SENT_LINKS_FILE, POSTS_LOG_FILE]:
             if not os.path.exists(file):
                 with open(file, 'w', encoding='utf-8') as f:
                     json.dump([], f)
-                logger.info(f"📁 Создан файл {file}")
         
         self.bot = Bot(token=TELEGRAM_TOKEN)
         self.translator = GoogleTranslator(source='en', target='ru')
@@ -67,65 +65,38 @@ class NewsBot:
         self.sent_links = self.load_json(SENT_LINKS_FILE)
         self.posts_log = self.load_json(POSTS_LOG_FILE)
         self.session = None
-        
-        # Статистика
-        self.stats = {
-            'total_checks': 0,
-            'total_published': 0,
-            'last_check': None,
-            'errors': []
-        }
-        
-        logger.info(f"📊 Загружено {len(self.sent_links)} ранее опубликованных ссылок")
-        logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе постов")
     
     def load_json(self, filename):
         try:
             with open(filename, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return set(data) if filename == SENT_LINKS_FILE else data
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки {filename}: {e}")
+                return set(json.load(f)) if filename == SENT_LINKS_FILE else json.load(f)
+        except:
             return set() if filename == SENT_LINKS_FILE else []
     
     def save_json(self, filename, data):
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                if isinstance(data, set):
-                    json.dump(list(data), f, ensure_ascii=False, indent=2)
-                else:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.debug(f"💾 Сохранено {filename}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения {filename}: {e}")
+        with open(filename, 'w', encoding='utf-8') as f:
+            if isinstance(data, set):
+                json.dump(list(data), f, ensure_ascii=False, indent=2)
+            else:
+                json.dump(data, f, ensure_ascii=False, indent=2)
     
     def can_post_now(self):
-        """Проверка лимитов"""
         if not self.posts_log:
-            logger.debug("✅ Нет истории постов, можно публиковать")
             return True
         
         last_post = max(self.posts_log, key=lambda x: x['time']) if self.posts_log else None
         if last_post:
             last_time = datetime.fromisoformat(last_post['time'])
-            time_diff = datetime.now() - last_time
-            if time_diff < timedelta(seconds=MIN_POST_INTERVAL):
-                logger.info(f"⏳ С последнего поста прошло {time_diff.seconds}с, нужно ждать {MIN_POST_INTERVAL}с")
+            if datetime.now() - last_time < timedelta(seconds=MIN_POST_INTERVAL):
                 return False
         
         today = datetime.now().date()
         today_posts = [p for p in self.posts_log 
                       if datetime.fromisoformat(p['time']).date() == today]
         
-        if len(today_posts) >= MAX_POSTS_PER_DAY:
-            logger.info(f"⏳ Достигнут дневной лимит {MAX_POSTS_PER_DAY} постов")
-            return False
-        
-        logger.debug(f"✅ Можно публиковать (сегодня {len(today_posts)}/{MAX_POSTS_PER_DAY})")
-        return True
+        return len(today_posts) < MAX_POSTS_PER_DAY
     
     def log_post(self, link, title):
-        """Логирование опубликованного поста"""
         self.posts_log.append({
             'link': link,
             'title': title[:50],
@@ -134,8 +105,6 @@ class NewsBot:
         if len(self.posts_log) > 100:
             self.posts_log = self.posts_log[-100:]
         self.save_json(POSTS_LOG_FILE, self.posts_log)
-        self.stats['total_published'] += 1
-        logger.info(f"📝 Пост залогирован: {title[:50]}...")
     
     async def get_session(self):
         if not self.session:
@@ -162,7 +131,7 @@ class NewsBot:
         return text
     
     def parse_infobrics(self, url):
-        """Парсинг статьи InfoBrics"""
+        """Парсинг статьи InfoBrics с получением ВСЕХ изображений"""
         try:
             logger.info(f"🌐 Парсинг InfoBrics: {url}")
             
@@ -172,7 +141,6 @@ class NewsBot:
             
             response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
-                logger.error(f"❌ Ошибка загрузки: HTTP {response.status_code}")
                 return None
             
             from bs4 import BeautifulSoup
@@ -183,25 +151,40 @@ class NewsBot:
             title_elem = soup.find('div', class_=re.compile(r'title.*big')) or soup.find('h1')
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
-                logger.info(f"✅ Заголовок: {title[:50]}...")
             
-            # Изображение
-            image_url = None
+            # Главное изображение
+            main_image = None
             img_elem = soup.find('img', class_=re.compile(r'article.*image'))
             if img_elem and img_elem.get('src'):
                 img_src = img_elem['src']
                 if img_src.startswith('/'):
-                    image_url = f"https://infobrics.org{img_src}"
+                    main_image = f"https://infobrics.org{img_src}"
                 elif not img_src.startswith('http'):
-                    image_url = f"https://infobrics.org/{img_src}"
+                    main_image = f"https://infobrics.org/{img_src}"
                 else:
-                    image_url = img_src
-                logger.info(f"✅ Изображение: {image_url}")
+                    main_image = img_src
             
-            # Текст
-            article_text = ""
+            # ВСЕ изображения в статье
+            all_images = []
             text_container = soup.find('div', class_=re.compile(r'article__text')) or soup.find('div', class_=re.compile(r'article'))
             
+            if text_container:
+                for img in text_container.find_all('img'):
+                    if img.get('src'):
+                        img_src = img['src']
+                        if img_src.startswith('/'):
+                            img_url = f"https://infobrics.org{img_src}"
+                        elif not img_src.startswith('http'):
+                            img_url = f"https://infobrics.org/{img_src}"
+                        else:
+                            img_url = img_src
+                        
+                        # Не добавляем главное изображение повторно
+                        if img_url != main_image:
+                            all_images.append(img_url)
+            
+            # Текст статьи
+            article_text = ""
             if text_container:
                 for unwanted in text_container.find_all(['script', 'style', 'button']):
                     unwanted.decompose()
@@ -214,16 +197,17 @@ class NewsBot:
                 
                 if paragraphs:
                     article_text = '\n\n'.join(paragraphs)
-                    logger.info(f"✅ Собрано {len(paragraphs)} параграфов, {len(article_text)} символов")
             
             if len(article_text) < 200:
-                logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
                 return None
+            
+            logger.info(f"✅ Найдено изображений: главное - {main_image}, дополнительных - {len(all_images)}")
             
             return {
                 'title': title,
                 'content': article_text,
-                'image': image_url
+                'main_image': main_image,
+                'additional_images': all_images
             }
             
         except Exception as e:
@@ -236,29 +220,21 @@ class NewsBot:
             feed_url = feed_config['url']
             source_name = feed_config['name']
             
-            logger.info(f"🔄 Проверка RSS {source_name}: {feed_url}")
+            logger.info(f"🔄 {source_name}: {feed_url}")
             
             feed = feedparser.parse(feed_url)
             
             if feed.bozo:
-                logger.error(f"❌ Ошибка RSS {source_name}: {feed.bozo_exception}")
+                logger.error(f"❌ Ошибка RSS {source_name}")
                 return []
             
-            # Логируем все статьи в RSS
-            logger.info(f"📰 В RSS всего {len(feed.entries)} статей")
-            
             news_items = []
-            for i, entry in enumerate(feed.entries[:3]):  # Смотрим последние 3
+            for entry in feed.entries[:1]:
                 link = entry.get('link', '')
-                title = entry.get('title', 'Без заголовка')
-                
-                logger.info(f"  {i+1}. {title[:50]}... - {link}")
                 
                 if link in self.sent_links:
-                    logger.info(f"     ⏭️ Уже опубликовано ранее")
+                    logger.info(f"⏭️ Уже было: {link}")
                     continue
-                
-                logger.info(f"     🔄 Новая статья, начинаю парсинг...")
                 
                 loop = asyncio.get_event_loop()
                 article_data = await loop.run_in_executor(None, self.parse_infobrics, link)
@@ -269,30 +245,20 @@ class NewsBot:
                         'title': article_data['title'],
                         'content': article_data['content'],
                         'link': link,
-                        'image': article_data.get('image')
+                        'main_image': article_data.get('main_image'),
+                        'additional_images': article_data.get('additional_images', [])
                     })
-                    logger.info(f"     ✅ Статья успешно спарсена")
-                else:
-                    logger.warning(f"     ❌ Не удалось спарсить статью")
                 
                 await asyncio.sleep(5)
             
-            logger.info(f"📊 {source_name}: найдено {len(news_items)} новых статей")
             return news_items
             
         except Exception as e:
-            logger.error(f"❌ Ошибка в fetch_news_from_feed: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return []
     
     async def fetch_all_news(self):
-        """Сбор новостей из всех источников"""
-        self.stats['total_checks'] += 1
-        self.stats['last_check'] = datetime.now().isoformat()
-        
-        logger.info("=" * 60)
-        logger.info(f"🔍 ПРОВЕРКА #{self.stats['total_checks']}")
-        logger.info("=" * 60)
-        
+        """Сбор новостей"""
         all_news = []
         
         for feed in RSS_FEEDS:
@@ -300,14 +266,7 @@ class NewsBot:
                 news = await self.fetch_news_from_feed(feed)
                 all_news.extend(news)
         
-        logger.info(f"📊 ВСЕГО НАЙДЕНО НОВЫХ СТАТЕЙ: {len(all_news)}")
-        
-        if len(all_news) == 0:
-            logger.info("📭 Нет новых статей для публикации")
-        else:
-            for i, item in enumerate(all_news, 1):
-                logger.info(f"  {i}. {item['title'][:70]}...")
-        
+        logger.info(f"📊 Найдено новых статей: {len(all_news)}")
         return all_news
     
     async def download_image(self, url):
@@ -324,7 +283,6 @@ class NewsBot:
                 if response.status == 200:
                     with open(path, 'wb') as f:
                         f.write(await response.read())
-                    logger.info(f"🖼️ Изображение скачано: {path}")
                     return path
             return None
         except Exception as e:
@@ -344,8 +302,7 @@ class NewsBot:
                     try:
                         translated = self.translator.translate(part)
                         parts.append(translated)
-                    except Exception as e:
-                        logger.error(f"Ошибка перевода части: {e}")
+                    except:
                         parts.append(part)
                     time.sleep(1)
                 return ' '.join(parts)
@@ -356,81 +313,144 @@ class NewsBot:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
     
-    def split_long_text(self, text, max_length=TELEGRAM_MAX_MESSAGE):
-        """Разбивает длинный текст на части"""
-        if len(text) <= max_length:
-            return [text]
+    def split_text_into_parts_with_images(self, text, images):
+        """
+        Разбивает текст на части и вставляет изображения между ними
+        Возвращает список частей, где каждая часть - словарь с текстом и опциональным изображением
+        """
+        if not text:
+            return []
+        
+        # Разбиваем на абзацы
+        paragraphs = text.split('\n\n')
+        
+        # Если текст короткий, возвращаем как есть
+        if len(text) <= TELEGRAM_MAX_MESSAGE and not images:
+            return [{'text': text, 'image': None}]
         
         parts = []
-        paragraphs = text.split('\n\n')
         current_part = ""
+        current_part_size = 0
+        part_images = []
         
+        # Определяем, сколько изображений у нас есть
+        images_copy = images.copy() if images else []
+        
+        # Проходим по абзацам и собираем части
         for para in paragraphs:
-            if len(current_part) + len(para) + 2 <= max_length:
+            para_size = len(para)
+            
+            # Если текущая часть + новый абзац превышает лимит
+            if current_part_size + para_size + 2 > TELEGRAM_MAX_MESSAGE and current_part:
+                # Сохраняем текущую часть
+                part_data = {'text': current_part.strip(), 'image': None}
+                
+                # Если есть изображения, добавляем одно к этой части
+                if images_copy:
+                    part_data['image'] = images_copy.pop(0)
+                    logger.info(f"🖼️ Добавлено изображение к части {len(parts)+1}")
+                
+                parts.append(part_data)
+                current_part = para
+                current_part_size = para_size
+            else:
+                # Добавляем абзац к текущей части
                 if current_part:
                     current_part += "\n\n" + para
+                    current_part_size += para_size + 2
                 else:
                     current_part = para
-            else:
-                if current_part:
-                    parts.append(current_part)
-                current_part = para
+                    current_part_size = para_size
         
+        # Добавляем последнюю часть
         if current_part:
-            parts.append(current_part)
+            part_data = {'text': current_part.strip(), 'image': None}
+            if images_copy:
+                part_data['image'] = images_copy.pop(0)
+            parts.append(part_data)
         
-        logger.info(f"✂️ Текст разбит на {len(parts)} частей")
+        # Если остались изображения, добавляем их как отдельные части
+        for img in images_copy:
+            parts.append({'text': None, 'image': img})
+            logger.info(f"🖼️ Добавлена отдельная часть с изображением")
+        
+        logger.info(f"📦 Текст разбит на {len(parts)} частей с {len(images) - len(images_copy)} вставленными изображениями")
         return parts
     
     async def create_post(self, news_item):
-        """Создание поста"""
+        """Создание поста с правильным размещением заголовка и изображений"""
         try:
             loop = asyncio.get_event_loop()
             
+            # Переводим заголовок
             logger.info("🔄 Перевод заголовка...")
             title_ru = await loop.run_in_executor(None, self.translate_text, news_item['title'])
             
+            # Переводим текст
             logger.info(f"🔄 Перевод текста ({len(news_item['content'])} символов)...")
             content_ru = await loop.run_in_executor(None, self.translate_text, news_item['content'])
             
+            # Экранируем
             title_ru = self.escape_html_for_telegram(title_ru)
             content_ru = self.escape_html_for_telegram(content_ru)
             
-            # Скачиваем изображение
-            image_path = None
-            if news_item.get('image'):
-                logger.info(f"🖼️ Скачивание изображения...")
-                image_path = await self.download_image(news_item['image'])
+            # Скачиваем главное изображение
+            main_image_path = None
+            if news_item.get('main_image'):
+                logger.info(f"🖼️ Скачивание главного изображения...")
+                main_image_path = await self.download_image(news_item['main_image'])
             
-            # Формируем полный текст
+            # Скачиваем дополнительные изображения
+            additional_images_paths = []
+            for i, img_url in enumerate(news_item.get('additional_images', [])[:5]):  # Максимум 5 доп. изображений
+                logger.info(f"🖼️ Скачивание доп. изображения {i+1}...")
+                img_path = await self.download_image(img_url)
+                if img_path:
+                    additional_images_paths.append(img_path)
+            
+            # Формируем полный текст с заголовком
             full_text = f"<b>{title_ru}</b>\n\n{content_ru}"
             source_link = news_item['link']
             source_name = news_item['source']
             full_text += f"\n\n📰 <a href='{source_link}'>Источник: {source_name}</a>"
             
-            # Разбиваем на части
-            text_parts = self.split_long_text(full_text)
+            # Разбиваем текст на части с изображениями
+            text_parts = self.split_text_into_parts_with_images(full_text, additional_images_paths)
             
             posts = []
             
-            # Если есть фото - отправляем отдельно
-            if image_path:
+            # 1. Сначала отправляем главное фото (если есть) с краткой подписью
+            if main_image_path:
                 short_caption = f"<b>{title_ru[:100]}...</b>" if len(title_ru) > 100 else f"<b>{title_ru}</b>"
                 posts.append({
                     'type': 'photo',
-                    'path': image_path,
+                    'path': main_image_path,
                     'caption': short_caption
                 })
-                logger.info("📸 Добавлено фото")
+                logger.info("📸 Добавлено главное фото")
             
-            # Добавляем текстовые части
+            # 2. Затем отправляем все текстовые части с их изображениями
             for i, part in enumerate(text_parts):
-                posts.append({
-                    'type': 'text',
-                    'text': part
-                })
+                if part['text']:  # Если есть текст
+                    posts.append({
+                        'type': 'text',
+                        'text': part['text']
+                    })
+                    logger.info(f"📝 Добавлена текстовая часть {i+1}")
+                
+                if part['image']:  # Если есть изображение для этой части
+                    # Пауза перед изображением
+                    if posts and len(posts) > 0:
+                        posts.append({'type': 'pause', 'duration': 3})
+                    
+                    posts.append({
+                        'type': 'photo',
+                        'path': part['image'],
+                        'caption': f"📷 Иллюстрация к части {i+1}"
+                    })
+                    logger.info(f"🖼️ Добавлено изображение к части {i+1}")
             
-            logger.info(f"📦 Всего сообщений для публикации: {len(posts)}")
+            logger.info(f"📦 Всего сообщений для публикации: {len([p for p in posts if p['type'] != 'pause'])}")
             return posts
             
         except Exception as e:
@@ -438,12 +458,18 @@ class NewsBot:
             return None
     
     async def publish_post(self, posts):
-        """Публикация нескольких сообщений"""
+        """Публикация нескольких сообщений с учетом пауз"""
         try:
             published_count = 0
+            total_messages = len([p for p in posts if p['type'] != 'pause'])
             
             for i, post in enumerate(posts):
                 try:
+                    if post['type'] == 'pause':
+                        logger.info(f"⏱ Пауза {post['duration']} секунд...")
+                        await asyncio.sleep(post['duration'])
+                        continue
+                    
                     if post['type'] == 'photo':
                         with open(post['path'], 'rb') as photo:
                             await self.bot.send_photo(
@@ -452,29 +478,31 @@ class NewsBot:
                                 caption=post['caption'],
                                 parse_mode='HTML'
                             )
+                        # Удаляем файл после отправки
                         try:
                             os.unlink(post['path'])
                         except:
                             pass
-                        logger.info(f"✅ Фото {i+1}/{len(posts)} опубликовано")
+                        published_count += 1
+                        logger.info(f"✅ Фото {published_count}/{total_messages} опубликовано")
                         
-                    else:
+                    else:  # text
                         await self.bot.send_message(
                             chat_id=CHANNEL_ID,
                             text=post['text'],
                             parse_mode='HTML',
                             disable_web_page_preview=False
                         )
-                        logger.info(f"✅ Текст {i+1}/{len(posts)} опубликован")
+                        published_count += 1
+                        logger.info(f"✅ Текст {published_count}/{total_messages} опубликован")
                     
-                    published_count += 1
-                    
-                    if i < len(posts) - 1:
-                        logger.info(f"⏱ Пауза 5 секунд...")
-                        await asyncio.sleep(5)
+                    # Пауза между сообщениями (кроме последнего)
+                    if i < len(posts) - 1 and posts[i+1]['type'] != 'pause':
+                        logger.info(f"⏱ Пауза 3 секунды...")
+                        await asyncio.sleep(3)
                         
                 except TelegramError as e:
-                    logger.error(f"❌ Ошибка публикации сообщения {i+1}: {e}")
+                    logger.error(f"❌ Ошибка публикации: {e}")
                     if "Can't parse entities" in str(e):
                         # Пробуем без HTML
                         plain_text = re.sub(r'<[^>]+>', '', post.get('caption', post.get('text', '')))
@@ -482,10 +510,10 @@ class NewsBot:
                             chat_id=CHANNEL_ID,
                             text=plain_text
                         )
-                        logger.info(f"✅ Сообщение {i+1} отправлено без HTML")
                         published_count += 1
+                        logger.info(f"✅ Сообщение отправлено без HTML")
             
-            return published_count == len(posts)
+            return published_count == total_messages
             
         except TelegramError as e:
             if "Too Many Requests" in str(e):
@@ -500,86 +528,75 @@ class NewsBot:
     
     async def check_and_publish(self):
         """Основной цикл"""
-        try:
-            news_items = await self.fetch_all_news()
+        logger.info("=" * 60)
+        logger.info("🔍 ПРОВЕРКА INFOBRICS")
+        logger.info("=" * 60)
+        
+        if not self.can_post_now():
+            logger.info("⏳ Достигнут лимит постов")
+            return
+        
+        news_items = await self.fetch_all_news()
+        
+        if not news_items:
+            logger.info("📭 Новых статей нет")
+            return
+        
+        published = 0
+        
+        for item in news_items:
+            if not self.can_post_now():
+                logger.info("⏳ Лимит достигнут, останавливаюсь")
+                break
             
-            if not news_items:
-                logger.info("📭 Нет новых статей для публикации")
-                return
+            logger.info(f"\n📝 Публикую статью: {item['title'][:70]}...")
             
-            published = 0
+            posts = await self.create_post(item)
             
-            for item in news_items:
-                if not self.can_post_now():
-                    logger.info("⏳ Достигнут лимит постов, останавливаюсь")
-                    break
+            if posts:
+                success = await self.publish_post(posts)
                 
-                logger.info(f"\n📝 Начинаю публикацию статьи: {item['title'][:70]}...")
-                
-                posts = await self.create_post(item)
-                
-                if posts:
-                    success = await self.publish_post(posts)
+                if success:
+                    self.sent_links.add(item['link'])
+                    self.save_json(SENT_LINKS_FILE, self.sent_links)
+                    self.log_post(item['link'], item['title'])
+                    published += 1
                     
-                    if success:
-                        self.sent_links.add(item['link'])
-                        self.save_json(SENT_LINKS_FILE, self.sent_links)
-                        self.log_post(item['link'], item['title'])
-                        published += 1
-                        logger.info(f"✅ Статья полностью опубликована")
-                        
-                        if published < len(news_items):
-                            logger.info(f"⏱ Пауза {MIN_POST_INTERVAL//60} минут до следующей статьи...")
-                            await asyncio.sleep(MIN_POST_INTERVAL)
-                    else:
-                        logger.error(f"❌ Не удалось опубликовать статью")
-            
-            logger.info(f"\n📊 ИТОГО ОПУБЛИКОВАНО: {published} статей")
-            
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка в check_and_publish: {e}")
-            import traceback
-            traceback.print_exc()
+                    if published < len(news_items):
+                        logger.info(f"⏱ Пауза {MIN_POST_INTERVAL//60} минут до следующей статьи...")
+                        await asyncio.sleep(MIN_POST_INTERVAL)
+        
+        logger.info(f"\n📊 Опубликовано статей: {published}")
     
     async def start(self):
         """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 7.4 - РАСШИРЕННОЕ ЛОГИРОВАНИЕ")
+        logger.info("🚀 NEWS BOT 7.5 - С КАРТИНКАМИ МЕЖДУ ЧАСТЯМИ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч ({CHECK_INTERVAL}с)")
+        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} статей/день")
-        logger.info(f"📁 Ранее опубликовано: {len(self.sent_links)} ссылок")
         logger.info("=" * 70)
         
         try:
             me = await self.bot.get_me()
-            logger.info(f"✅ Бот @{me.username} авторизован")
+            logger.info(f"✅ Бот @{me.username}")
         except Exception as e:
-            logger.error(f"❌ Ошибка подключения бота: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return
         
-        # Первая проверка
-        logger.info("🚀 ЗАПУСК ПЕРВОЙ ПРОВЕРКИ")
         await self.check_and_publish()
         
-        # Планировщик
         self.scheduler.add_job(
             self.check_and_publish,
             'interval',
-            seconds=CHECK_INTERVAL,
-            id='news_checker',
-            next_run_time=datetime.now() + timedelta(seconds=CHECK_INTERVAL)
+            seconds=CHECK_INTERVAL
         )
         self.scheduler.start()
-        logger.info(f"✅ Планировщик запущен")
-        logger.info(f"⏰ Следующая проверка через {CHECK_INTERVAL//3600} часов")
         
         try:
             while True:
                 await asyncio.sleep(60)
-                logger.debug("🟢 Бот работает, ожидание...")
         except KeyboardInterrupt:
-            logger.info("🛑 Бот остановлен")
             if self.session:
                 await self.session.close()
 
@@ -588,11 +605,4 @@ async def main():
     await bot.start()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен")
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+    asyncio.run(main())
