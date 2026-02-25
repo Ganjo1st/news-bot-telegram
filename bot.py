@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 7.5
-ИСПРАВЛЕНО: дублирование заголовков + картинки между частями
+🤖 Telegram News Bot - Версия 7.6
+ИСПРАВЛЕНО: разбиение длинных сообщений
 """
 
 import os
@@ -179,7 +179,6 @@ class NewsBot:
                         else:
                             img_url = img_src
                         
-                        # Не добавляем главное изображение повторно
                         if img_url != main_image:
                             all_images.append(img_url)
             
@@ -313,10 +312,10 @@ class NewsBot:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
     
-    def split_text_into_parts_with_images(self, text, images):
+    def split_text_into_parts_with_images(self, text, images, max_length=4096):
         """
         Разбивает текст на части и вставляет изображения между ними
-        Возвращает список частей, где каждая часть - словарь с текстом и опциональным изображением
+        Гарантирует, что каждая часть не превышает max_length
         """
         if not text:
             return []
@@ -324,43 +323,33 @@ class NewsBot:
         # Разбиваем на абзацы
         paragraphs = text.split('\n\n')
         
-        # Если текст короткий, возвращаем как есть
-        if len(text) <= TELEGRAM_MAX_MESSAGE and not images:
-            return [{'text': text, 'image': None}]
-        
         parts = []
         current_part = ""
-        current_part_size = 0
-        part_images = []
-        
-        # Определяем, сколько изображений у нас есть
+        current_part_length = 0
         images_copy = images.copy() if images else []
         
-        # Проходим по абзацам и собираем части
         for para in paragraphs:
-            para_size = len(para)
+            para_length = len(para)
             
-            # Если текущая часть + новый абзац превышает лимит
-            if current_part_size + para_size + 2 > TELEGRAM_MAX_MESSAGE and current_part:
+            # Проверяем, не превысит ли добавление этого параграфа лимит
+            if current_part_length + para_length + 2 > max_length and current_part:
                 # Сохраняем текущую часть
                 part_data = {'text': current_part.strip(), 'image': None}
-                
-                # Если есть изображения, добавляем одно к этой части
                 if images_copy:
                     part_data['image'] = images_copy.pop(0)
-                    logger.info(f"🖼️ Добавлено изображение к части {len(parts)+1}")
-                
                 parts.append(part_data)
+                
+                # Начинаем новую часть с этого параграфа
                 current_part = para
-                current_part_size = para_size
+                current_part_length = para_length
             else:
-                # Добавляем абзац к текущей части
+                # Добавляем параграф к текущей части
                 if current_part:
                     current_part += "\n\n" + para
-                    current_part_size += para_size + 2
+                    current_part_length += para_length + 2
                 else:
                     current_part = para
-                    current_part_size = para_size
+                    current_part_length = para_length
         
         # Добавляем последнюю часть
         if current_part:
@@ -372,10 +361,17 @@ class NewsBot:
         # Если остались изображения, добавляем их как отдельные части
         for img in images_copy:
             parts.append({'text': None, 'image': img})
-            logger.info(f"🖼️ Добавлена отдельная часть с изображением")
         
-        logger.info(f"📦 Текст разбит на {len(parts)} частей с {len(images) - len(images_copy)} вставленными изображениями")
-        return parts
+        # Финальная проверка - если какая-то часть все еще слишком длинная (редкий случай)
+        final_parts = []
+        for part in parts:
+            if part['text'] and len(part['text']) > max_length:
+                # Обрезаем слишком длинную часть
+                part['text'] = part['text'][:max_length-3] + '...'
+            final_parts.append(part)
+        
+        logger.info(f"📦 Текст разбит на {len(final_parts)} частей")
+        return final_parts
     
     async def create_post(self, news_item):
         """Создание поста с правильным размещением заголовка и изображений"""
@@ -394,67 +390,81 @@ class NewsBot:
             title_ru = self.escape_html_for_telegram(title_ru)
             content_ru = self.escape_html_for_telegram(content_ru)
             
-            # Скачиваем главное изображение
+            # Скачиваем главное изображение (макс 1)
             main_image_path = None
             if news_item.get('main_image'):
                 logger.info(f"🖼️ Скачивание главного изображения...")
                 main_image_path = await self.download_image(news_item['main_image'])
             
-            # Скачиваем дополнительные изображения
+            # Скачиваем дополнительные изображения (максимум 2)
             additional_images_paths = []
-            for i, img_url in enumerate(news_item.get('additional_images', [])[:5]):  # Максимум 5 доп. изображений
+            for i, img_url in enumerate(news_item.get('additional_images', [])[:2]):
                 logger.info(f"🖼️ Скачивание доп. изображения {i+1}...")
                 img_path = await self.download_image(img_url)
                 if img_path:
                     additional_images_paths.append(img_path)
             
-            # Формируем полный текст с заголовком
-            full_text = f"<b>{title_ru}</b>\n\n{content_ru}"
-            source_link = news_item['link']
-            source_name = news_item['source']
-            full_text += f"\n\n📰 <a href='{source_link}'>Источник: {source_name}</a>"
+            # Формируем полный текст (без заголовка - он будет в первом сообщении)
+            full_text = f"{content_ru}\n\n📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
             
             # Разбиваем текст на части с изображениями
             text_parts = self.split_text_into_parts_with_images(full_text, additional_images_paths)
             
             posts = []
             
-            # 1. Сначала отправляем главное фото (если есть) с краткой подписью
+            # 1. Сначала отправляем главное фото (если есть) с заголовком
             if main_image_path:
-                short_caption = f"<b>{title_ru[:100]}...</b>" if len(title_ru) > 100 else f"<b>{title_ru}</b>"
+                short_title = title_ru[:100] + "..." if len(title_ru) > 100 else title_ru
                 posts.append({
                     'type': 'photo',
                     'path': main_image_path,
-                    'caption': short_caption
+                    'caption': f"<b>{short_title}</b>"
                 })
                 logger.info("📸 Добавлено главное фото")
             
-            # 2. Затем отправляем все текстовые части с их изображениями
-            for i, part in enumerate(text_parts):
-                if part['text']:  # Если есть текст
+            # 2. Затем отправляем первую текстовую часть С ЗАГОЛОВКОМ
+            if text_parts and text_parts[0]['text']:
+                first_part_text = f"<b>{title_ru}</b>\n\n{text_parts[0]['text']}"
+                posts.append({
+                    'type': 'text',
+                    'text': first_part_text
+                })
+                logger.info(f"📝 Добавлена текстовая часть 1 (с заголовком)")
+                
+                # Если к первой части есть изображение, добавляем его после текста
+                if text_parts[0].get('image'):
+                    posts.append({'type': 'pause', 'duration': 3})
+                    posts.append({
+                        'type': 'photo',
+                        'path': text_parts[0]['image'],
+                        'caption': f"📷 Иллюстрация"
+                    })
+            
+            # 3. Остальные части (без заголовка)
+            for i, part in enumerate(text_parts[1:], 2):
+                if part['text']:
+                    posts.append({'type': 'pause', 'duration': 3})
                     posts.append({
                         'type': 'text',
                         'text': part['text']
                     })
-                    logger.info(f"📝 Добавлена текстовая часть {i+1}")
+                    logger.info(f"📝 Добавлена текстовая часть {i}")
                 
-                if part['image']:  # Если есть изображение для этой части
-                    # Пауза перед изображением
-                    if posts and len(posts) > 0:
-                        posts.append({'type': 'pause', 'duration': 3})
-                    
+                if part.get('image'):
+                    posts.append({'type': 'pause', 'duration': 3})
                     posts.append({
                         'type': 'photo',
                         'path': part['image'],
-                        'caption': f"📷 Иллюстрация к части {i+1}"
+                        'caption': f"📷 Иллюстрация к части {i}"
                     })
-                    logger.info(f"🖼️ Добавлено изображение к части {i+1}")
             
             logger.info(f"📦 Всего сообщений для публикации: {len([p for p in posts if p['type'] != 'pause'])}")
             return posts
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания поста: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def publish_post(self, posts):
@@ -475,8 +485,8 @@ class NewsBot:
                             await self.bot.send_photo(
                                 chat_id=CHANNEL_ID,
                                 photo=photo,
-                                caption=post['caption'],
-                                parse_mode='HTML'
+                                caption=post.get('caption', ''),
+                                parse_mode='HTML' if post.get('caption') else None
                             )
                         # Удаляем файл после отправки
                         try:
@@ -502,7 +512,7 @@ class NewsBot:
                         await asyncio.sleep(3)
                         
                 except TelegramError as e:
-                    logger.error(f"❌ Ошибка публикации: {e}")
+                    logger.error(f"❌ Ошибка публикации сообщения {i+1}: {e}")
                     if "Can't parse entities" in str(e):
                         # Пробуем без HTML
                         plain_text = re.sub(r'<[^>]+>', '', post.get('caption', post.get('text', '')))
@@ -512,6 +522,18 @@ class NewsBot:
                         )
                         published_count += 1
                         logger.info(f"✅ Сообщение отправлено без HTML")
+                    elif "Message is too long" in str(e):
+                        # Обрезаем и пробуем снова
+                        plain_text = re.sub(r'<[^>]+>', '', post.get('caption', post.get('text', '')))
+                        plain_text = plain_text[:3500] + "... (обрезано)"
+                        await self.bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=plain_text
+                        )
+                        published_count += 1
+                        logger.info(f"✅ Сообщение обрезано и отправлено")
+                    else:
+                        raise e
             
             return published_count == total_messages
             
@@ -565,13 +587,15 @@ class NewsBot:
                     if published < len(news_items):
                         logger.info(f"⏱ Пауза {MIN_POST_INTERVAL//60} минут до следующей статьи...")
                         await asyncio.sleep(MIN_POST_INTERVAL)
+                else:
+                    logger.error(f"❌ Не удалось опубликовать статью")
         
         logger.info(f"\n📊 Опубликовано статей: {published}")
     
     async def start(self):
         """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 7.5 - С КАРТИНКАМИ МЕЖДУ ЧАСТЯМИ")
+        logger.info("🚀 NEWS BOT 7.6 - ИСПРАВЛЕНО РАЗБИЕНИЕ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} статей/день")
@@ -592,6 +616,8 @@ class NewsBot:
             seconds=CHECK_INTERVAL
         )
         self.scheduler.start()
+        logger.info(f"✅ Планировщик запущен")
+        logger.info(f"⏰ Следующая проверка через {CHECK_INTERVAL//3600} часов")
         
         try:
             while True:
