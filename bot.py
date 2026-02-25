@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 7.6
-ИСПРАВЛЕНО: разбиение длинных сообщений
+🤖 Telegram News Bot - Версия 7.7
+ИСПРАВЛЕНО: убрана подпись под фото, заголовок только в тексте
 """
 
 import os
@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
-CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '600'))  # 10 минут для теста!
-MIN_POST_INTERVAL = 120  # 2 минуты между постами (для теста)
-MAX_POSTS_PER_DAY = 48   # 48 постов в день для теста
+CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '7200'))  # 2 часа
+MIN_POST_INTERVAL = 600  # 10 минут между постами
+MAX_POSTS_PER_DAY = 24
 
 # Только InfoBrics
 RSS_FEEDS = [
@@ -362,11 +362,10 @@ class NewsBot:
         for img in images_copy:
             parts.append({'text': None, 'image': img})
         
-        # Финальная проверка - если какая-то часть все еще слишком длинная (редкий случай)
+        # Финальная проверка
         final_parts = []
         for part in parts:
             if part['text'] and len(part['text']) > max_length:
-                # Обрезаем слишком длинную часть
                 part['text'] = part['text'][:max_length-3] + '...'
             final_parts.append(part)
         
@@ -374,7 +373,7 @@ class NewsBot:
         return final_parts
     
     async def create_post(self, news_item):
-        """Создание поста с правильным размещением заголовка и изображений"""
+        """Создание поста - заголовок ТОЛЬКО в первом текстовом сообщении"""
         try:
             loop = asyncio.get_event_loop()
             
@@ -390,7 +389,7 @@ class NewsBot:
             title_ru = self.escape_html_for_telegram(title_ru)
             content_ru = self.escape_html_for_telegram(content_ru)
             
-            # Скачиваем главное изображение (макс 1)
+            # Скачиваем главное изображение
             main_image_path = None
             if news_item.get('main_image'):
                 logger.info(f"🖼️ Скачивание главного изображения...")
@@ -412,15 +411,14 @@ class NewsBot:
             
             posts = []
             
-            # 1. Сначала отправляем главное фото (если есть) с заголовком
+            # 1. Сначала отправляем главное фото БЕЗ ПОДПИСИ
             if main_image_path:
-                short_title = title_ru[:100] + "..." if len(title_ru) > 100 else title_ru
                 posts.append({
                     'type': 'photo',
                     'path': main_image_path,
-                    'caption': f"<b>{short_title}</b>"
+                    'caption': None  # Нет подписи!
                 })
-                logger.info("📸 Добавлено главное фото")
+                logger.info("📸 Добавлено главное фото (без подписи)")
             
             # 2. Затем отправляем первую текстовую часть С ЗАГОЛОВКОМ
             if text_parts and text_parts[0]['text']:
@@ -429,7 +427,7 @@ class NewsBot:
                     'type': 'text',
                     'text': first_part_text
                 })
-                logger.info(f"📝 Добавлена текстовая часть 1 (с заголовком)")
+                logger.info(f"📝 Добавлена текстовая часть 1 (С ЗАГОЛОВКОМ)")
                 
                 # Если к первой части есть изображение, добавляем его после текста
                 if text_parts[0].get('image'):
@@ -437,7 +435,7 @@ class NewsBot:
                     posts.append({
                         'type': 'photo',
                         'path': text_parts[0]['image'],
-                        'caption': f"📷 Иллюстрация"
+                        'caption': None  # Без подписи
                     })
             
             # 3. Остальные части (без заголовка)
@@ -455,7 +453,7 @@ class NewsBot:
                     posts.append({
                         'type': 'photo',
                         'path': part['image'],
-                        'caption': f"📷 Иллюстрация к части {i}"
+                        'caption': None  # Без подписи
                     })
             
             logger.info(f"📦 Всего сообщений для публикации: {len([p for p in posts if p['type'] != 'pause'])}")
@@ -482,12 +480,20 @@ class NewsBot:
                     
                     if post['type'] == 'photo':
                         with open(post['path'], 'rb') as photo:
-                            await self.bot.send_photo(
-                                chat_id=CHANNEL_ID,
-                                photo=photo,
-                                caption=post.get('caption', ''),
-                                parse_mode='HTML' if post.get('caption') else None
-                            )
+                            if post.get('caption'):
+                                # Если есть подпись, отправляем с подписью
+                                await self.bot.send_photo(
+                                    chat_id=CHANNEL_ID,
+                                    photo=photo,
+                                    caption=post['caption'],
+                                    parse_mode='HTML'
+                                )
+                            else:
+                                # Если нет подписи, отправляем просто фото
+                                await self.bot.send_photo(
+                                    chat_id=CHANNEL_ID,
+                                    photo=photo
+                                )
                         # Удаляем файл после отправки
                         try:
                             os.unlink(post['path'])
@@ -506,7 +512,7 @@ class NewsBot:
                         published_count += 1
                         logger.info(f"✅ Текст {published_count}/{total_messages} опубликован")
                     
-                    # Пауза между сообщениями (кроме последнего)
+                    # Пауза между сообщениями
                     if i < len(posts) - 1 and posts[i+1]['type'] != 'pause':
                         logger.info(f"⏱ Пауза 3 секунды...")
                         await asyncio.sleep(3)
@@ -515,16 +521,17 @@ class NewsBot:
                     logger.error(f"❌ Ошибка публикации сообщения {i+1}: {e}")
                     if "Can't parse entities" in str(e):
                         # Пробуем без HTML
-                        plain_text = re.sub(r'<[^>]+>', '', post.get('caption', post.get('text', '')))
-                        await self.bot.send_message(
-                            chat_id=CHANNEL_ID,
-                            text=plain_text
-                        )
-                        published_count += 1
-                        logger.info(f"✅ Сообщение отправлено без HTML")
-                    elif "Message is too long" in str(e):
+                        if post['type'] == 'text':
+                            plain_text = re.sub(r'<[^>]+>', '', post['text'])
+                            await self.bot.send_message(
+                                chat_id=CHANNEL_ID,
+                                text=plain_text
+                            )
+                            published_count += 1
+                            logger.info(f"✅ Сообщение отправлено без HTML")
+                    elif "Message is too long" in str(e) and post['type'] == 'text':
                         # Обрезаем и пробуем снова
-                        plain_text = re.sub(r'<[^>]+>', '', post.get('caption', post.get('text', '')))
+                        plain_text = re.sub(r'<[^>]+>', '', post['text'])
                         plain_text = plain_text[:3500] + "... (обрезано)"
                         await self.bot.send_message(
                             chat_id=CHANNEL_ID,
@@ -595,7 +602,7 @@ class NewsBot:
     async def start(self):
         """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 7.6 - ИСПРАВЛЕНО РАЗБИЕНИЕ")
+        logger.info("🚀 NEWS BOT 7.7 - БЕЗ ПОДПИСЕЙ ПОД ФОТО")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} статей/день")
