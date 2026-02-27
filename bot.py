@@ -1,6 +1,7 @@
 """
-🤖 Telegram News Bot - Версия 8.5
-УМНАЯ ОБРЕЗКА БЕЗ МНОГОТОЧИЙ
+🤖 Telegram News Bot - Версия 8.6
+БЕЗ УКАЗАНИЯ ИСТОЧНИКА В КОНЦЕ
+Только заголовок и текст статьи
 """
 
 import os
@@ -368,23 +369,18 @@ class NewsBot:
             # Если совсем ничего не поместилось (крайний случай)
             return paragraph[:max_length]
     
-    def build_caption_with_smart_truncation(self, title, paragraphs, source_link, source_name, max_length=TELEGRAM_MAX_CAPTION):
+    def build_caption_with_smart_truncation(self, title, paragraphs, max_length=TELEGRAM_MAX_CAPTION):
         """
-        Строит подпись с умной обрезкой:
-        - Первый абзац может быть обрезан по предложениям (БЕЗ МНОГОТОЧИЯ)
-        - Остальные абзацы - только целиком, иначе пропускаются (БЕЗ МНОГОТОЧИЯ)
+        Строит подпись с умной обрезкой.
+        БЕЗ УКАЗАНИЯ ИСТОЧНИКА В КОНЦЕ.
         """
         # Базовая часть с заголовком
         title_part = f"<b>{title}</b>"
         current_text = title_part
         current_length = len(title_part)
         
-        # Резервируем место для ссылки
-        source_part = f"\n\n📰 <a href='{source_link}'>Источник: {source_name}</a>"
-        source_length = len(source_part)
-        
-        # Доступно для текста
-        available_for_text = max_length - source_length - 5
+        # ВСЁ доступное место для текста (источник убран)
+        available_for_text = max_length - 5  # небольшой запас
         
         # Если заголовок слишком длинный
         if current_length >= available_for_text:
@@ -417,7 +413,7 @@ class NewsBot:
                     added_any_text = True
                     logger.info(f"✅ Первый абзац поместился целиком ({len(para)} символов)")
                 else:
-                    # Не помещается - обрезаем по предложениям (БЕЗ МНОГОТОЧИЯ)
+                    # Не помещается - обрезаем по предложениям
                     max_para_length = available_for_text - current_length - len(separator)
                     truncated_para = self.truncate_first_paragraph_by_sentences(para, max_para_length)
                     
@@ -437,12 +433,12 @@ class NewsBot:
                     added_any_text = True
                     logger.info(f"✅ Добавлен абзац {i+1} целиком")
                 else:
-                    # Если не помещается - просто останавливаемся (НИКАКИХ МНОГОТОЧИЙ)
+                    # Если не помещается - просто останавливаемся
                     logger.info(f"⏹️ Останов на абзаце {i+1}, дальше не влезает")
                     break
         
-        # Добавляем ссылку на источник
-        final_caption = current_text + source_part
+        # Финальная подпись (БЕЗ ИСТОЧНИКА)
+        final_caption = current_text
         
         # Проверка длины
         logger.info(f"📏 Итоговая длина: {len(final_caption)}/{max_length}")
@@ -451,7 +447,7 @@ class NewsBot:
     
     async def create_single_post(self, news_item):
         """
-        Создание ОДНОГО поста с умной обрезкой текста
+        Создание ОДНОГО поста с фото и текстом
         """
         try:
             loop = asyncio.get_event_loop()
@@ -479,12 +475,10 @@ class NewsBot:
                 logger.info(f"🖼️ Скачивание изображения...")
                 image_path = await self.download_image(news_item['main_image'])
             
-            # СТРОИМ ПОДПИСЬ С УМНОЙ ОБРЕЗКОЙ
+            # СТРОИМ ПОДПИСЬ (БЕЗ ИСТОЧНИКА)
             final_caption = self.build_caption_with_smart_truncation(
                 title=title_escaped,
                 paragraphs=paragraphs,
-                source_link=news_item['link'],
-                source_name=news_item['source'],
                 max_length=TELEGRAM_MAX_CAPTION
             )
             
@@ -583,7 +577,7 @@ class NewsBot:
     async def start(self):
         """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.5 - ОБРЕЗКА БЕЗ МНОГОТОЧИЙ")
+        logger.info("🚀 NEWS BOT 8.6 - БЕЗ УКАЗАНИЯ ИСТОЧНИКА")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
