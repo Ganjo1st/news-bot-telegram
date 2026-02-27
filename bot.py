@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 8.3
-АБСОЛЮТНО ПОЛНЫЕ АБЗАЦЫ - никаких обрывов!
+🤖 Telegram News Bot - Версия 8.4
+УМНАЯ ОБРЕЗКА: первый абзац обрезается по предложениям, остальные только целиком
 """
 
 import os
@@ -320,64 +320,148 @@ class NewsBot:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
     
-    def build_caption_with_full_paragraphs(self, title, paragraphs, source_link, source_name, max_length=TELEGRAM_MAX_CAPTION):
+    def truncate_first_paragraph_by_sentences(self, paragraph, max_length):
         """
-        Строит подпись, добавляя абзацы ТОЛЬКО ЦЕЛИКОМ.
-        Если абзац не помещается - не добавляет его, а ставит многоточие.
+        Обрезает первый абзац по предложениям.
+        Возвращает обрезанный текст и флаг, был ли он обрезан.
+        """
+        if len(paragraph) <= max_length:
+            return paragraph, False
+        
+        # Разбиваем на предложения (по .!? с пробелом)
+        sentences = re.split(r'(?<=[.!?])\s+', paragraph)
+        
+        result_sentences = []
+        current_length = 0
+        
+        for sent in sentences:
+            sent_length = len(sent)
+            # Добавляем пробел между предложениями, если не первое
+            if result_sentences:
+                sent_length += 1  # пробел
+            
+            if current_length + sent_length <= max_length - 3:  # резервируем место для "..."
+                if result_sentences:
+                    current_length += 1  # пробел
+                result_sentences.append(sent)
+                current_length += len(sent)
+            else:
+                # Если не помещается ни одного предложения, берем начало последнего
+                if not result_sentences:
+                    # Обрезаем по словам
+                    words = sent.split()
+                    for word in words:
+                        if current_length + len(word) + 1 <= max_length - 3:
+                            if result_sentences:
+                                result_sentences.append(' ' + word)
+                                current_length += len(word) + 1
+                            else:
+                                result_sentences.append(word)
+                                current_length += len(word)
+                        else:
+                            break
+                break
+        
+        if result_sentences:
+            truncated = ' '.join(result_sentences) + "..."
+            return truncated, True
+        else:
+            # Если совсем ничего не поместилось
+            return paragraph[:max_length-3] + "...", True
+    
+    def build_caption_with_smart_truncation(self, title, paragraphs, source_link, source_name, max_length=TELEGRAM_MAX_CAPTION):
+        """
+        Строит подпись с умной обрезкой:
+        - Первый абзац может быть обрезан по предложениям
+        - Остальные абзацы - только целиком, иначе пропускаются
         """
         # Базовая часть с заголовком
         title_part = f"<b>{title}</b>"
-        base_length = len(title_part)
+        current_text = title_part
+        current_length = len(title_part)
         
-        # Добавляем заголовок
-        result_parts = [title_part]
-        current_length = base_length
+        # Резервируем место для ссылки (примерно 70 символов)
+        # Мы добавим ссылку в конце, поэтому нужно учитывать её с самого начала
+        source_part = f"\n\n📰 <a href='{source_link}'>Источник: {source_name}</a>"
+        source_length = len(source_part)
         
-        # Переменная для отслеживания, были ли добавлены абзацы
-        added_any_paragraph = False
+        # Доступно для текста (с запасом)
+        available_for_text = max_length - source_length - 5
         
+        # Если заголовок уже почти заполнил лимит
+        if current_length >= available_for_text:
+            logger.warning("⚠️ Заголовок слишком длинный, обрезаю...")
+            title_truncated = title[:50] + "..."
+            title_part = f"<b>{title_truncated}</b>"
+            current_text = title_part
+            current_length = len(title_part)
+        
+        added_any_text = False
+        
+        # Обрабатываем абзацы
         for i, para in enumerate(paragraphs):
-            # Определяем разделитель (для первого абзаца после заголовка - два переноса)
-            if i == 0 and not added_any_paragraph:
+            # Определяем разделитель
+            if i == 0 and not added_any_text:
                 separator = "\n\n"
             else:
                 separator = "\n\n"
             
-            # Сколько займет этот абзац с разделителем
-            para_with_sep = separator + para
-            para_length = len(para_with_sep)
-            
-            # Проверяем, поместится ли абзац с учетом будущей ссылки
-            # Резервируем место для ссылки (примерно 70 символов)
-            estimated_final_length = current_length + para_length + 70
-            
-            if estimated_final_length <= max_length:
-                # Абзац помещается - добавляем
-                result_parts.append(para_with_sep)
-                current_length += para_length
-                added_any_paragraph = True
+            # Для первого абзаца - специальная обработка
+            if i == 0:
+                # Проверяем, поместится ли первый абзац целиком
+                para_with_sep = separator + para
+                para_length = len(para_with_sep)
+                
+                if current_length + para_length <= available_for_text:
+                    # Помещается целиком
+                    current_text += para_with_sep
+                    current_length += para_length
+                    added_any_text = True
+                    logger.info(f"✅ Первый абзац поместился целиком ({len(para)} символов)")
+                else:
+                    # Не помещается - обрезаем по предложениям
+                    max_para_length = available_for_text - current_length - len(separator)
+                    truncated_para, was_truncated = self.truncate_first_paragraph_by_sentences(para, max_para_length)
+                    
+                    if truncated_para:
+                        current_text += separator + truncated_para
+                        current_length += len(separator) + len(truncated_para)
+                        added_any_text = True
+                        logger.info(f"✂️ Первый абзац обрезан по предложениям ({len(truncated_para)} символов)")
+                    else:
+                        # Если даже обрезать не получилось, добавляем многоточие
+                        current_text += separator + "..."
+                        current_length += len(separator) + 3
+                        added_any_text = True
+                        logger.warning("⚠️ Первый абзац полностью заменен на ...")
             else:
-                # Абзац не помещается - останавливаемся и добавляем многоточие
-                if added_any_paragraph:
-                    result_parts.append("\n\n...")
-                    current_length += 5  # длина "..."
-                break
+                # Для последующих абзацев - только целиком
+                para_with_sep = separator + para
+                para_length = len(para_with_sep)
+                
+                if current_length + para_length <= available_for_text:
+                    current_text += para_with_sep
+                    current_length += para_length
+                    added_any_text = True
+                    logger.info(f"✅ Добавлен абзац {i+1} целиком")
+                else:
+                    # Если не помещается - останавливаемся и добавляем многоточие
+                    if added_any_text:
+                        current_text += "\n\n..."
+                        current_length += 5
+                    break
         
         # Добавляем ссылку на источник
-        source_part = f"\n\n📰 <a href='{source_link}'>Источник: {source_name}</a>"
-        result_parts.append(source_part)
+        final_caption = current_text + source_part
         
-        # Собираем финальный текст
-        final_caption = ''.join(result_parts)
-        
-        # Проверка длины (для отладки)
-        logger.info(f"📏 Построена подпись: {len(final_caption)}/{max_length}")
+        # Проверка длины
+        logger.info(f"📏 Итоговая длина: {len(final_caption)}/{max_length}")
         
         return final_caption
     
     async def create_single_post(self, news_item):
         """
-        Создание ОДНОГО поста с фото и текстом - только целые абзацы!
+        Создание ОДНОГО поста с умной обрезкой текста
         """
         try:
             loop = asyncio.get_event_loop()
@@ -405,20 +489,14 @@ class NewsBot:
                 logger.info(f"🖼️ Скачивание изображения...")
                 image_path = await self.download_image(news_item['main_image'])
             
-            # СТРОИМ ПОДПИСЬ С ЦЕЛЫМИ АБЗАЦАМИ
-            final_caption = self.build_caption_with_full_paragraphs(
+            # СТРОИМ ПОДПИСЬ С УМНОЙ ОБРЕЗКОЙ
+            final_caption = self.build_caption_with_smart_truncation(
                 title=title_escaped,
                 paragraphs=paragraphs,
                 source_link=news_item['link'],
                 source_name=news_item['source'],
                 max_length=TELEGRAM_MAX_CAPTION
             )
-            
-            # Финальная проверка длины
-            if len(final_caption) > TELEGRAM_MAX_CAPTION:
-                logger.warning(f"⚠️ КАК ЭТО ВОЗМОЖНО? Подпись слишком длинная: {len(final_caption)}")
-                # Экстренная обрезка - просто берем первые 1000 символов
-                final_caption = final_caption[:1000] + "...\n\n📰 <a href='{news_item['link']}'>Источник</a>"
             
             return {
                 'image_path': image_path,
@@ -515,7 +593,7 @@ class NewsBot:
     async def start(self):
         """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.3 - ТОЛЬКО ЦЕЛЫЕ АБЗАЦЫ")
+        logger.info("🚀 NEWS BOT 8.4 - УМНАЯ ОБРЕЗКА")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
