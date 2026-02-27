@@ -1,6 +1,7 @@
 """
-🤖 Telegram News Bot - Версия 7.7
-ИСПРАВЛЕНО: убрана подпись под фото, заголовок только в тексте
+🤖 Telegram News Bot - Версия 8.0
+ОДНО СООБЩЕНИЕ: фото + текст до 1024 символов
+Для правильной работы с Синхроботом Дзена
 """
 
 import os
@@ -28,12 +29,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация - ВРЕМЕННО игнорируем переменную окружения
+# Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
-CHECK_INTERVAL = 600  # ← ЖЕСТКО ЗАДАЕМ 10 минут (игнорируем переменную)
-MIN_POST_INTERVAL = 120  # 2 минуты между постами
-MAX_POSTS_PER_DAY = 48
+CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '7200'))  # 2 часа
+MIN_POST_INTERVAL = 600  # 10 минут между постами
+MAX_POSTS_PER_DAY = 24
 
 # Только InfoBrics
 RSS_FEEDS = [
@@ -49,8 +50,7 @@ SENT_LINKS_FILE = 'sent_links.json'
 POSTS_LOG_FILE = 'posts_log.json'
 
 # Константы Telegram
-TELEGRAM_MAX_CAPTION = 1024
-TELEGRAM_MAX_MESSAGE = 4096
+TELEGRAM_MAX_CAPTION = 1024  # Лимит подписи к фото
 
 class NewsBot:
     def __init__(self):
@@ -131,7 +131,7 @@ class NewsBot:
         return text
     
     def parse_infobrics(self, url):
-        """Парсинг статьи InfoBrics с получением ВСЕХ изображений"""
+        """Парсинг статьи InfoBrics - только главное изображение и текст"""
         try:
             logger.info(f"🌐 Парсинг InfoBrics: {url}")
             
@@ -164,26 +164,10 @@ class NewsBot:
                 else:
                     main_image = img_src
             
-            # ВСЕ изображения в статье
-            all_images = []
-            text_container = soup.find('div', class_=re.compile(r'article__text')) or soup.find('div', class_=re.compile(r'article'))
-            
-            if text_container:
-                for img in text_container.find_all('img'):
-                    if img.get('src'):
-                        img_src = img['src']
-                        if img_src.startswith('/'):
-                            img_url = f"https://infobrics.org{img_src}"
-                        elif not img_src.startswith('http'):
-                            img_url = f"https://infobrics.org/{img_src}"
-                        else:
-                            img_url = img_src
-                        
-                        if img_url != main_image:
-                            all_images.append(img_url)
-            
             # Текст статьи
             article_text = ""
+            text_container = soup.find('div', class_=re.compile(r'article__text')) or soup.find('div', class_=re.compile(r'article'))
+            
             if text_container:
                 for unwanted in text_container.find_all(['script', 'style', 'button']):
                     unwanted.decompose()
@@ -200,13 +184,12 @@ class NewsBot:
             if len(article_text) < 200:
                 return None
             
-            logger.info(f"✅ Найдено изображений: главное - {main_image}, дополнительных - {len(all_images)}")
+            logger.info(f"✅ Найдено: заголовок, главное изображение, текст {len(article_text)} символов")
             
             return {
                 'title': title,
                 'content': article_text,
-                'main_image': main_image,
-                'additional_images': all_images
+                'main_image': main_image
             }
             
         except Exception as e:
@@ -244,8 +227,7 @@ class NewsBot:
                         'title': article_data['title'],
                         'content': article_data['content'],
                         'link': link,
-                        'main_image': article_data.get('main_image'),
-                        'additional_images': article_data.get('additional_images', [])
+                        'main_image': article_data.get('main_image')
                     })
                 
                 await asyncio.sleep(5)
@@ -294,10 +276,11 @@ class NewsBot:
             if not text or len(text) < 20:
                 return text
             
-            if len(text) > 4000:
+            # Для длинных текстов переводим по частям
+            if len(text) > 3000:
                 parts = []
-                for i in range(0, len(text), 3000):
-                    part = text[i:i+3000]
+                for i in range(0, len(text), 2000):
+                    part = text[i:i+2000]
                     try:
                         translated = self.translator.translate(part)
                         parts.append(translated)
@@ -312,152 +295,107 @@ class NewsBot:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
     
-    def split_text_into_parts_with_images(self, text, images, max_length=4096):
+    def truncate_to_last_paragraph(self, text, max_length):
         """
-        Разбивает текст на части и вставляет изображения между ними
-        Гарантирует, что каждая часть не превышает max_length
+        Обрезает текст до последнего полного абзаца, который помещается в лимит
+        Учитывает, что после текста нужно добавить ссылку на источник
         """
         if not text:
-            return []
+            return ""
         
         # Разбиваем на абзацы
         paragraphs = text.split('\n\n')
         
-        parts = []
-        current_part = ""
-        current_part_length = 0
-        images_copy = images.copy() if images else []
+        # Резервируем место для ссылки на источник (примерно 50 символов)
+        available_length = max_length - 50
+        
+        result_paragraphs = []
+        current_length = 0
         
         for para in paragraphs:
             para_length = len(para)
             
-            # Проверяем, не превысит ли добавление этого параграфа лимит
-            if current_part_length + para_length + 2 > max_length and current_part:
-                # Сохраняем текущую часть
-                part_data = {'text': current_part.strip(), 'image': None}
-                if images_copy:
-                    part_data['image'] = images_copy.pop(0)
-                parts.append(part_data)
-                
-                # Начинаем новую часть с этого параграфа
-                current_part = para
-                current_part_length = para_length
+            # Проверяем, поместится ли этот абзац
+            if current_length + para_length + 2 <= available_length:
+                result_paragraphs.append(para)
+                current_length += para_length + 2
             else:
-                # Добавляем параграф к текущей части
-                if current_part:
-                    current_part += "\n\n" + para
-                    current_part_length += para_length + 2
-                else:
-                    current_part = para
-                    current_part_length = para_length
+                # Если не помещается, останавливаемся
+                break
         
-        # Добавляем последнюю часть
-        if current_part:
-            part_data = {'text': current_part.strip(), 'image': None}
-            if images_copy:
-                part_data['image'] = images_copy.pop(0)
-            parts.append(part_data)
+        if not result_paragraphs:
+            # Если ни один абзац не поместился, берем начало первого с обрезкой
+            first_para = paragraphs[0]
+            if len(first_para) > available_length - 3:
+                return first_para[:available_length-3] + "..."
+            return first_para
         
-        # Если остались изображения, добавляем их как отдельные части
-        for img in images_copy:
-            parts.append({'text': None, 'image': img})
-        
-        # Финальная проверка
-        final_parts = []
-        for part in parts:
-            if part['text'] and len(part['text']) > max_length:
-                part['text'] = part['text'][:max_length-3] + '...'
-            final_parts.append(part)
-        
-        logger.info(f"📦 Текст разбит на {len(final_parts)} частей")
-        return final_parts
+        return '\n\n'.join(result_paragraphs)
     
-    async def create_post(self, news_item):
-        """Создание поста - заголовок ТОЛЬКО в первом текстовом сообщении"""
+    async def create_single_post(self, news_item):
+        """
+        Создание ОДНОГО поста с фото и текстом (до 1024 символов)
+        """
         try:
             loop = asyncio.get_event_loop()
             
-            # Переводим заголовок
+            # Переводим заголовок (не используется в финальном посте, но для логов)
             logger.info("🔄 Перевод заголовка...")
             title_ru = await loop.run_in_executor(None, self.translate_text, news_item['title'])
             
             # Переводим текст
             logger.info(f"🔄 Перевод текста ({len(news_item['content'])} символов)...")
-            content_ru = await loop.run_in_executor(None, self.translate_text, news_item['content'])
+            full_content_ru = await loop.run_in_executor(None, self.translate_text, news_item['content'])
             
             # Экранируем
-            title_ru = self.escape_html_for_telegram(title_ru)
-            content_ru = self.escape_html_for_telegram(content_ru)
+            title_ru_escaped = self.escape_html_for_telegram(title_ru)
+            content_ru_escaped = self.escape_html_for_telegram(full_content_ru)
             
             # Скачиваем главное изображение
-            main_image_path = None
+            image_path = None
             if news_item.get('main_image'):
-                logger.info(f"🖼️ Скачивание главного изображения...")
-                main_image_path = await self.download_image(news_item['main_image'])
+                logger.info(f"🖼️ Скачивание изображения...")
+                image_path = await self.download_image(news_item['main_image'])
             
-            # Скачиваем дополнительные изображения (максимум 2)
-            additional_images_paths = []
-            for i, img_url in enumerate(news_item.get('additional_images', [])[:2]):
-                logger.info(f"🖼️ Скачивание доп. изображения {i+1}...")
-                img_path = await self.download_image(img_url)
-                if img_path:
-                    additional_images_paths.append(img_path)
+            # ФОРМИРУЕМ ПОЛНЫЙ ТЕКСТ (сначала заголовок, потом текст, потом ссылка)
+            full_text_with_source = f"<b>{title_ru_escaped}</b>\n\n{content_ru_escaped}\n\n📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
             
-            # Формируем полный текст (без заголовка - он будет в первом сообщении)
-            full_text = f"{content_ru}\n\n📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
+            # Обрезаем текст до последнего полного абзаца, который помещается в лимит
+            # Вычитаем длину заголовка и ссылки, которые уже точно будут
+            title_length = len(f"<b>{title_ru_escaped}</b>\n\n")
+            source_length = len(f"\n\n📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>")
             
-            # Разбиваем текст на части с изображениями
-            text_parts = self.split_text_into_parts_with_images(full_text, additional_images_paths)
+            # Максимальная длина для текста (без заголовка и ссылки)
+            max_content_length = TELEGRAM_MAX_CAPTION - title_length - source_length - 5  # 5 про запас
             
-            posts = []
+            # Обрезаем текст с сохранением абзацев
+            truncated_content = self.truncate_to_last_paragraph(content_ru_escaped, max_content_length)
             
-            # 1. Сначала отправляем главное фото БЕЗ ПОДПИСИ
-            if main_image_path:
-                posts.append({
-                    'type': 'photo',
-                    'path': main_image_path,
-                    'caption': None  # Нет подписи!
-                })
-                logger.info("📸 Добавлено главное фото (без подписи)")
+            # Если текст был обрезан, добавляем многоточие
+            if len(truncated_content) < len(content_ru_escaped):
+                if truncated_content.endswith('...'):
+                    pass  # уже есть
+                else:
+                    truncated_content += "..."
             
-            # 2. Затем отправляем первую текстовую часть С ЗАГОЛОВКОМ
-            if text_parts and text_parts[0]['text']:
-                first_part_text = f"<b>{title_ru}</b>\n\n{text_parts[0]['text']}"
-                posts.append({
-                    'type': 'text',
-                    'text': first_part_text
-                })
-                logger.info(f"📝 Добавлена текстовая часть 1 (С ЗАГОЛОВКОМ)")
-                
-                # Если к первой части есть изображение, добавляем его после текста
-                if text_parts[0].get('image'):
-                    posts.append({'type': 'pause', 'duration': 3})
-                    posts.append({
-                        'type': 'photo',
-                        'path': text_parts[0]['image'],
-                        'caption': None  # Без подписи
-                    })
+            # Финальный текст для подписи
+            final_caption = f"<b>{title_ru_escaped}</b>\n\n{truncated_content}\n\n📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
             
-            # 3. Остальные части (без заголовка)
-            for i, part in enumerate(text_parts[1:], 2):
-                if part['text']:
-                    posts.append({'type': 'pause', 'duration': 3})
-                    posts.append({
-                        'type': 'text',
-                        'text': part['text']
-                    })
-                    logger.info(f"📝 Добавлена текстовая часть {i}")
-                
-                if part.get('image'):
-                    posts.append({'type': 'pause', 'duration': 3})
-                    posts.append({
-                        'type': 'photo',
-                        'path': part['image'],
-                        'caption': None  # Без подписи
-                    })
+            # Проверяем длину (должна быть <= 1024)
+            caption_length = len(final_caption)
+            logger.info(f"📏 Длина подписи: {caption_length}/{TELEGRAM_MAX_CAPTION} символов")
             
-            logger.info(f"📦 Всего сообщений для публикации: {len([p for p in posts if p['type'] != 'pause'])}")
-            return posts
+            if caption_length > TELEGRAM_MAX_CAPTION:
+                # Если все еще слишком длинно, обрезаем еще жестче
+                excess = caption_length - TELEGRAM_MAX_CAPTION + 10
+                truncated_content = truncated_content[:-excess] + "..."
+                final_caption = f"<b>{title_ru_escaped}</b>\n\n{truncated_content}\n\n📰 <a href='{news_item['link']}'>Источник: {news_item['source']}</a>"
+                logger.info(f"📏 Повторная обрезка: {len(final_caption)} символов")
+            
+            return {
+                'image_path': image_path,
+                'caption': final_caption
+            }
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания поста: {e}")
@@ -465,89 +403,48 @@ class NewsBot:
             traceback.print_exc()
             return None
     
-    async def publish_post(self, posts):
-        """Публикация нескольких сообщений с учетом пауз"""
+    async def publish_post(self, post_data):
+        """Публикация ОДНОГО сообщения с фото и подписью"""
         try:
-            published_count = 0
-            total_messages = len([p for p in posts if p['type'] != 'pause'])
-            
-            for i, post in enumerate(posts):
+            if post_data['image_path']:
+                with open(post_data['image_path'], 'rb') as photo:
+                    await self.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=photo,
+                        caption=post_data['caption'],
+                        parse_mode='HTML'
+                    )
+                # Удаляем временный файл
                 try:
-                    if post['type'] == 'pause':
-                        logger.info(f"⏱ Пауза {post['duration']} секунд...")
-                        await asyncio.sleep(post['duration'])
-                        continue
-                    
-                    if post['type'] == 'photo':
-                        with open(post['path'], 'rb') as photo:
-                            if post.get('caption'):
-                                # Если есть подпись, отправляем с подписью
-                                await self.bot.send_photo(
-                                    chat_id=CHANNEL_ID,
-                                    photo=photo,
-                                    caption=post['caption'],
-                                    parse_mode='HTML'
-                                )
-                            else:
-                                # Если нет подписи, отправляем просто фото
-                                await self.bot.send_photo(
-                                    chat_id=CHANNEL_ID,
-                                    photo=photo
-                                )
-                        # Удаляем файл после отправки
-                        try:
-                            os.unlink(post['path'])
-                        except:
-                            pass
-                        published_count += 1
-                        logger.info(f"✅ Фото {published_count}/{total_messages} опубликовано")
-                        
-                    else:  # text
-                        await self.bot.send_message(
-                            chat_id=CHANNEL_ID,
-                            text=post['text'],
-                            parse_mode='HTML',
-                            disable_web_page_preview=False
-                        )
-                        published_count += 1
-                        logger.info(f"✅ Текст {published_count}/{total_messages} опубликован")
-                    
-                    # Пауза между сообщениями
-                    if i < len(posts) - 1 and posts[i+1]['type'] != 'pause':
-                        logger.info(f"⏱ Пауза 3 секунды...")
-                        await asyncio.sleep(3)
-                        
-                except TelegramError as e:
-                    logger.error(f"❌ Ошибка публикации сообщения {i+1}: {e}")
-                    if "Can't parse entities" in str(e):
-                        # Пробуем без HTML
-                        if post['type'] == 'text':
-                            plain_text = re.sub(r'<[^>]+>', '', post['text'])
-                            await self.bot.send_message(
-                                chat_id=CHANNEL_ID,
-                                text=plain_text
-                            )
-                            published_count += 1
-                            logger.info(f"✅ Сообщение отправлено без HTML")
-                    elif "Message is too long" in str(e) and post['type'] == 'text':
-                        # Обрезаем и пробуем снова
-                        plain_text = re.sub(r'<[^>]+>', '', post['text'])
-                        plain_text = plain_text[:3500] + "... (обрезано)"
-                        await self.bot.send_message(
-                            chat_id=CHANNEL_ID,
-                            text=plain_text
-                        )
-                        published_count += 1
-                        logger.info(f"✅ Сообщение обрезано и отправлено")
-                    else:
-                        raise e
-            
-            return published_count == total_messages
-            
+                    os.unlink(post_data['image_path'])
+                except:
+                    pass
+                logger.info("✅ Пост с фото и подписью опубликован")
+                return True
+            else:
+                # Если нет фото, отправляем только текст
+                await self.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=post_data['caption'],
+                    parse_mode='HTML',
+                    disable_web_page_preview=False
+                )
+                logger.info("✅ Текстовый пост опубликован")
+                return True
+                
         except TelegramError as e:
             if "Too Many Requests" in str(e):
                 logger.warning("⚠️ Лимит Telegram, жду 1 час...")
                 await asyncio.sleep(3600)
+            elif "Can't parse entities" in str(e):
+                # Если HTML не работает, отправляем без форматирования
+                logger.warning("⚠️ Ошибка HTML, отправляю без форматирования")
+                plain_text = re.sub(r'<[^>]+>', '', post_data['caption'])
+                await self.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=plain_text
+                )
+                return True
             else:
                 logger.error(f"❌ Ошибка Telegram: {e}")
             return False
@@ -558,7 +455,7 @@ class NewsBot:
     async def check_and_publish(self):
         """Основной цикл"""
         logger.info("=" * 60)
-        logger.info("🔍 ПРОВЕРКА INFOBRICS")
+        logger.info("🔍 ПРОВЕРКА INFOBRICS (ОДИН ПОСТ НА СТАТЬЮ)")
         logger.info("=" * 60)
         
         if not self.can_post_now():
@@ -580,10 +477,10 @@ class NewsBot:
             
             logger.info(f"\n📝 Публикую статью: {item['title'][:70]}...")
             
-            posts = await self.create_post(item)
+            post_data = await self.create_single_post(item)
             
-            if posts:
-                success = await self.publish_post(posts)
+            if post_data:
+                success = await self.publish_post(post_data)
                 
                 if success:
                     self.sent_links.add(item['link'])
@@ -602,10 +499,11 @@ class NewsBot:
     async def start(self):
         """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 7.7 - БЕЗ ПОДПИСЕЙ ПОД ФОТО")
+        logger.info("🚀 NEWS BOT 8.0 - ОДИН ПОСТ НА СТАТЬЮ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} статей/день")
+        logger.info(f"📏 Лимит подписи: {TELEGRAM_MAX_CAPTION} символов")
         logger.info("=" * 70)
         
         try:
