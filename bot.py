@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 8.4
-УМНАЯ ОБРЕЗКА: первый абзац обрезается по предложениям, остальные только целиком
+🤖 Telegram News Bot - Версия 8.5
+УМНАЯ ОБРЕЗКА БЕЗ МНОГОТОЧИЙ
 """
 
 import os
@@ -323,10 +323,10 @@ class NewsBot:
     def truncate_first_paragraph_by_sentences(self, paragraph, max_length):
         """
         Обрезает первый абзац по предложениям.
-        Возвращает обрезанный текст и флаг, был ли он обрезан.
+        НЕ добавляет многоточие в конце.
         """
         if len(paragraph) <= max_length:
-            return paragraph, False
+            return paragraph
         
         # Разбиваем на предложения (по .!? с пробелом)
         sentences = re.split(r'(?<=[.!?])\s+', paragraph)
@@ -340,7 +340,7 @@ class NewsBot:
             if result_sentences:
                 sent_length += 1  # пробел
             
-            if current_length + sent_length <= max_length - 3:  # резервируем место для "..."
+            if current_length + sent_length <= max_length:
                 if result_sentences:
                     current_length += 1  # пробел
                 result_sentences.append(sent)
@@ -351,7 +351,7 @@ class NewsBot:
                     # Обрезаем по словам
                     words = sent.split()
                     for word in words:
-                        if current_length + len(word) + 1 <= max_length - 3:
+                        if current_length + len(word) + 1 <= max_length:
                             if result_sentences:
                                 result_sentences.append(' ' + word)
                                 current_length += len(word) + 1
@@ -363,32 +363,30 @@ class NewsBot:
                 break
         
         if result_sentences:
-            truncated = ' '.join(result_sentences) + "..."
-            return truncated, True
+            return ' '.join(result_sentences)
         else:
-            # Если совсем ничего не поместилось
-            return paragraph[:max_length-3] + "...", True
+            # Если совсем ничего не поместилось (крайний случай)
+            return paragraph[:max_length]
     
     def build_caption_with_smart_truncation(self, title, paragraphs, source_link, source_name, max_length=TELEGRAM_MAX_CAPTION):
         """
         Строит подпись с умной обрезкой:
-        - Первый абзац может быть обрезан по предложениям
-        - Остальные абзацы - только целиком, иначе пропускаются
+        - Первый абзац может быть обрезан по предложениям (БЕЗ МНОГОТОЧИЯ)
+        - Остальные абзацы - только целиком, иначе пропускаются (БЕЗ МНОГОТОЧИЯ)
         """
         # Базовая часть с заголовком
         title_part = f"<b>{title}</b>"
         current_text = title_part
         current_length = len(title_part)
         
-        # Резервируем место для ссылки (примерно 70 символов)
-        # Мы добавим ссылку в конце, поэтому нужно учитывать её с самого начала
+        # Резервируем место для ссылки
         source_part = f"\n\n📰 <a href='{source_link}'>Источник: {source_name}</a>"
         source_length = len(source_part)
         
-        # Доступно для текста (с запасом)
+        # Доступно для текста
         available_for_text = max_length - source_length - 5
         
-        # Если заголовок уже почти заполнил лимит
+        # Если заголовок слишком длинный
         if current_length >= available_for_text:
             logger.warning("⚠️ Заголовок слишком длинный, обрезаю...")
             title_truncated = title[:50] + "..."
@@ -419,21 +417,15 @@ class NewsBot:
                     added_any_text = True
                     logger.info(f"✅ Первый абзац поместился целиком ({len(para)} символов)")
                 else:
-                    # Не помещается - обрезаем по предложениям
+                    # Не помещается - обрезаем по предложениям (БЕЗ МНОГОТОЧИЯ)
                     max_para_length = available_for_text - current_length - len(separator)
-                    truncated_para, was_truncated = self.truncate_first_paragraph_by_sentences(para, max_para_length)
+                    truncated_para = self.truncate_first_paragraph_by_sentences(para, max_para_length)
                     
-                    if truncated_para:
+                    if truncated_para and len(truncated_para) > 0:
                         current_text += separator + truncated_para
                         current_length += len(separator) + len(truncated_para)
                         added_any_text = True
                         logger.info(f"✂️ Первый абзац обрезан по предложениям ({len(truncated_para)} символов)")
-                    else:
-                        # Если даже обрезать не получилось, добавляем многоточие
-                        current_text += separator + "..."
-                        current_length += len(separator) + 3
-                        added_any_text = True
-                        logger.warning("⚠️ Первый абзац полностью заменен на ...")
             else:
                 # Для последующих абзацев - только целиком
                 para_with_sep = separator + para
@@ -445,10 +437,8 @@ class NewsBot:
                     added_any_text = True
                     logger.info(f"✅ Добавлен абзац {i+1} целиком")
                 else:
-                    # Если не помещается - останавливаемся и добавляем многоточие
-                    if added_any_text:
-                        current_text += "\n\n..."
-                        current_length += 5
+                    # Если не помещается - просто останавливаемся (НИКАКИХ МНОГОТОЧИЙ)
+                    logger.info(f"⏹️ Останов на абзаце {i+1}, дальше не влезает")
                     break
         
         # Добавляем ссылку на источник
@@ -593,7 +583,7 @@ class NewsBot:
     async def start(self):
         """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.4 - УМНАЯ ОБРЕЗКА")
+        logger.info("🚀 NEWS BOT 8.5 - ОБРЕЗКА БЕЗ МНОГОТОЧИЙ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
