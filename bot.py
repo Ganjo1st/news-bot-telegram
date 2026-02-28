@@ -1,7 +1,9 @@
 """
-🤖 Telegram News Bot - Версия 8.6
-БЕЗ УКАЗАНИЯ ИСТОЧНИКА В КОНЦЕ
-Только заголовок и текст статьи
+🤖 Telegram News Bot - Версия 8.7
+ПОЛНОСТЬЮ РАБОЧАЯ ВЕРСИЯ
+- Учет часового пояса UTC+7
+- Без указания источника
+- Умная обрезка текста
 """
 
 import os
@@ -35,7 +37,8 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2s
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '7200'))  # 2 часа
 MIN_POST_INTERVAL = 600  # Базовая пауза 10 минут
-MAX_POSTS_PER_DAY = 20   # Чуть меньше лимита
+MAX_POSTS_PER_DAY = 20   # Лимит постов в день
+TIMEZONE_OFFSET = 7      # Смещение для UTC+7
 
 # Источники
 RSS_FEEDS = [
@@ -94,10 +97,13 @@ class NewsBot:
             logger.error(f"❌ Ошибка сохранения {filename}: {e}")
     
     def can_post_now(self):
-        """Проверка всех лимитов"""
-        hour = datetime.now().hour
-        if 23 <= hour or hour < 7:
-            logger.info("🌙 Ночное время, пропускаю")
+        """Проверка всех лимитов с учетом часового пояса UTC+7"""
+        # Корректируем время для UTC+7
+        local_hour = (datetime.now().hour + TIMEZONE_OFFSET) % 24
+        
+        # Не публикуем с 23:00 до 07:00 по местному времени
+        if 23 <= local_hour or local_hour < 7:
+            logger.info(f"🌙 Ночное время по местному ({local_hour}:00), пропускаю")
             return False
         
         if self.posts_log:
@@ -105,13 +111,19 @@ class NewsBot:
             last_time = datetime.fromisoformat(last_post['time'])
             time_diff = datetime.now() - last_time
             if time_diff < timedelta(seconds=MIN_POST_INTERVAL):
+                logger.info(f"⏳ С последнего поста прошло {time_diff.seconds}с, нужно ждать {MIN_POST_INTERVAL}с")
                 return False
         
         today = datetime.now().date()
         today_posts = [p for p in self.posts_log 
                       if datetime.fromisoformat(p['time']).date() == today]
         
-        return len(today_posts) < MAX_POSTS_PER_DAY
+        if len(today_posts) >= MAX_POSTS_PER_DAY:
+            logger.info(f"⏳ Достигнут дневной лимит {MAX_POSTS_PER_DAY} постов")
+            return False
+        
+        logger.debug(f"✅ Можно публиковать (сегодня {len(today_posts)}/{MAX_POSTS_PER_DAY})")
+        return True
     
     def log_post(self, link, title):
         self.posts_log.append({
@@ -129,7 +141,6 @@ class NewsBot:
         return self.session
     
     def clean_text(self, text):
-        """Очистка текста"""
         if not text:
             return ""
         text = html.unescape(text)
@@ -139,7 +150,6 @@ class NewsBot:
         return text.strip()
     
     def escape_html_for_telegram(self, text):
-        """Экранирование для Telegram"""
         if not text:
             return ""
         text = text.replace('&', '&amp;')
@@ -148,7 +158,6 @@ class NewsBot:
         return text
     
     def parse_article(self, url, source_name):
-        """Парсинг статьи"""
         try:
             logger.info(f"🌐 Парсинг {source_name}: {url}")
             
@@ -220,7 +229,6 @@ class NewsBot:
             return None
     
     async def fetch_news_from_feed(self, feed_config):
-        """Получение новостей из RSS"""
         try:
             feed_url = feed_config['url']
             source_name = feed_config['name']
@@ -265,7 +273,6 @@ class NewsBot:
             return []
     
     async def fetch_all_news(self):
-        """Сбор новостей"""
         all_news = []
         
         for feed in RSS_FEEDS:
@@ -278,7 +285,6 @@ class NewsBot:
         return all_news
     
     async def download_image(self, url):
-        """Скачивание изображения"""
         try:
             if not url:
                 return None
@@ -298,7 +304,6 @@ class NewsBot:
             return None
     
     def translate_text(self, text):
-        """Перевод текста"""
         try:
             if not text or len(text) < 20:
                 return text
@@ -322,14 +327,9 @@ class NewsBot:
             return text
     
     def truncate_first_paragraph_by_sentences(self, paragraph, max_length):
-        """
-        Обрезает первый абзац по предложениям.
-        НЕ добавляет многоточие в конце.
-        """
         if len(paragraph) <= max_length:
             return paragraph
         
-        # Разбиваем на предложения (по .!? с пробелом)
         sentences = re.split(r'(?<=[.!?])\s+', paragraph)
         
         result_sentences = []
@@ -337,19 +337,16 @@ class NewsBot:
         
         for sent in sentences:
             sent_length = len(sent)
-            # Добавляем пробел между предложениями, если не первое
             if result_sentences:
-                sent_length += 1  # пробел
+                sent_length += 1
             
             if current_length + sent_length <= max_length:
                 if result_sentences:
-                    current_length += 1  # пробел
+                    current_length += 1
                 result_sentences.append(sent)
                 current_length += len(sent)
             else:
-                # Если не помещается ни одного предложения, берем начало последнего
                 if not result_sentences:
-                    # Обрезаем по словам
                     words = sent.split()
                     for word in words:
                         if current_length + len(word) + 1 <= max_length:
@@ -366,23 +363,15 @@ class NewsBot:
         if result_sentences:
             return ' '.join(result_sentences)
         else:
-            # Если совсем ничего не поместилось (крайний случай)
             return paragraph[:max_length]
     
     def build_caption_with_smart_truncation(self, title, paragraphs, max_length=TELEGRAM_MAX_CAPTION):
-        """
-        Строит подпись с умной обрезкой.
-        БЕЗ УКАЗАНИЯ ИСТОЧНИКА В КОНЦЕ.
-        """
-        # Базовая часть с заголовком
         title_part = f"<b>{title}</b>"
         current_text = title_part
         current_length = len(title_part)
         
-        # ВСЁ доступное место для текста (источник убран)
-        available_for_text = max_length - 5  # небольшой запас
+        available_for_text = max_length - 5
         
-        # Если заголовок слишком длинный
         if current_length >= available_for_text:
             logger.warning("⚠️ Заголовок слишком длинный, обрезаю...")
             title_truncated = title[:50] + "..."
@@ -392,28 +381,22 @@ class NewsBot:
         
         added_any_text = False
         
-        # Обрабатываем абзацы
         for i, para in enumerate(paragraphs):
-            # Определяем разделитель
             if i == 0 and not added_any_text:
                 separator = "\n\n"
             else:
                 separator = "\n\n"
             
-            # Для первого абзаца - специальная обработка
             if i == 0:
-                # Проверяем, поместится ли первый абзац целиком
                 para_with_sep = separator + para
                 para_length = len(para_with_sep)
                 
                 if current_length + para_length <= available_for_text:
-                    # Помещается целиком
                     current_text += para_with_sep
                     current_length += para_length
                     added_any_text = True
                     logger.info(f"✅ Первый абзац поместился целиком ({len(para)} символов)")
                 else:
-                    # Не помещается - обрезаем по предложениям
                     max_para_length = available_for_text - current_length - len(separator)
                     truncated_para = self.truncate_first_paragraph_by_sentences(para, max_para_length)
                     
@@ -423,7 +406,6 @@ class NewsBot:
                         added_any_text = True
                         logger.info(f"✂️ Первый абзац обрезан по предложениям ({len(truncated_para)} символов)")
             else:
-                # Для последующих абзацев - только целиком
                 para_with_sep = separator + para
                 para_length = len(para_with_sep)
                 
@@ -433,26 +415,18 @@ class NewsBot:
                     added_any_text = True
                     logger.info(f"✅ Добавлен абзац {i+1} целиком")
                 else:
-                    # Если не помещается - просто останавливаемся
                     logger.info(f"⏹️ Останов на абзаце {i+1}, дальше не влезает")
                     break
         
-        # Финальная подпись (БЕЗ ИСТОЧНИКА)
         final_caption = current_text
-        
-        # Проверка длины
         logger.info(f"📏 Итоговая длина: {len(final_caption)}/{max_length}")
         
         return final_caption
     
     async def create_single_post(self, news_item):
-        """
-        Создание ОДНОГО поста с фото и текстом
-        """
         try:
             loop = asyncio.get_event_loop()
             
-            # Переводим
             logger.info("🔄 Перевод заголовка...")
             await asyncio.sleep(random.uniform(0.5, 2))
             title_ru = await loop.run_in_executor(None, self.translate_text, news_item['title'])
@@ -461,21 +435,17 @@ class NewsBot:
             await asyncio.sleep(random.uniform(1, 3))
             content_ru = await loop.run_in_executor(None, self.translate_text, news_item['content'])
             
-            # Экранируем
             title_escaped = self.escape_html_for_telegram(title_ru)
             content_escaped = self.escape_html_for_telegram(content_ru)
             
-            # Разбиваем на абзацы
             paragraphs = content_escaped.split('\n\n')
             logger.info(f"📊 Статья содержит {len(paragraphs)} абзацев")
             
-            # Скачиваем изображение
             image_path = None
             if news_item.get('main_image'):
                 logger.info(f"🖼️ Скачивание изображения...")
                 image_path = await self.download_image(news_item['main_image'])
             
-            # СТРОИМ ПОДПИСЬ (БЕЗ ИСТОЧНИКА)
             final_caption = self.build_caption_with_smart_truncation(
                 title=title_escaped,
                 paragraphs=paragraphs,
@@ -494,7 +464,6 @@ class NewsBot:
             return None
     
     async def publish_post(self, post_data):
-        """Публикация поста"""
         try:
             if post_data['image_path']:
                 with open(post_data['image_path'], 'rb') as photo:
@@ -532,7 +501,6 @@ class NewsBot:
             return False
     
     async def check_and_publish(self):
-        """Основной цикл"""
         logger.info("=" * 60)
         logger.info("🔍 ПРОВЕРКА НОВОСТЕЙ")
         logger.info("=" * 60)
@@ -575,13 +543,13 @@ class NewsBot:
         logger.info(f"\n📊 Опубликовано: {published}")
     
     async def start(self):
-        """Запуск"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.6 - БЕЗ УКАЗАНИЯ ИСТОЧНИКА")
+        logger.info("🚀 NEWS BOT 8.7 - UTC+7, БЕЗ ИСТОЧНИКА")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
         logger.info(f"📏 Лимит подписи: {TELEGRAM_MAX_CAPTION}")
+        logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
         logger.info("=" * 70)
         
         try:
@@ -599,6 +567,7 @@ class NewsBot:
             seconds=CHECK_INTERVAL
         )
         self.scheduler.start()
+        logger.info(f"✅ Планировщик запущен")
         
         try:
             while True:
