@@ -1,10 +1,10 @@
 """
-🤖 Telegram News Bot - Версия 8.13
-С ЕДИНЫМИ ПРАВИЛАМИ ПУБЛИКАЦИИ
+🤖 Telegram News Bot - Версия 8.14
+С УЛУЧШЕННОЙ ФИЛЬТРАЦИЕЙ ТЕКСТА
 - UTC+7 часовой пояс
 - Без указания источника
 - Умная обрезка текста
-- AP News только в выходные
+- Очистка от служебной информации
 """
 
 import os
@@ -193,6 +193,101 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
     
+    def is_junk_text(self, text):
+        """Проверяет, является ли текст служебным (не частью статьи)"""
+        text_lower = text.lower()
+        
+        # Список маркеров служебного текста
+        junk_markers = [
+            'subscribe',
+            'newsletter',
+            'click here',
+            'read more',
+            'follow us',
+            'sign up',
+            'share this',
+            'facebook',
+            'twitter',
+            'linkedin',
+            'reddit',
+            'pinterest',
+            'whatsapp',
+            'telegram',
+            'email',
+            'print',
+            'copy link',
+            'link copied',
+            'edited by',
+            'editors:',
+            'editor:',
+            'photographer:',
+            'video by',
+            'photos by',
+            'associated press',
+            'ap news',
+            'add ap news',
+            'add to google',
+            'preferred source',
+            'see more',
+            'view comments',
+            'comments:',
+            '©',
+            'copyright',
+            'all rights reserved',
+            'terms of use',
+            'privacy policy',
+            'help',
+            'feedback',
+            'contact us',
+            'about us',
+            'advertise',
+            'careers',
+            'press releases'
+        ]
+        
+        for marker in junk_markers:
+            if marker in text_lower:
+                return True
+        
+        # Проверяем на очень короткий текст (менее 20 символов)
+        if len(text) < 20:
+            return True
+        
+        # Проверяем на наличие множества специальных символов (обычно в кнопках шаринга)
+        special_chars = sum(1 for c in text if not c.isalnum() and not c.isspace())
+        if len(text) > 0 and special_chars / len(text) > 0.3:  # >30% спецсимволов
+            return True
+        
+        return False
+    
+    def clean_apnews_content(self, text):
+        """Дополнительная очистка текста AP News от служебной информации"""
+        # Удаляем строки с информацией о редакторах
+        text = re.sub(r'(?i)edited by.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)editor:.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)photographer:.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)video by.*?(?:\n|$)', '', text)
+        
+        # Удаляем строки с призывами подписаться
+        text = re.sub(r'(?i)add ap news.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)add to google.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)preferred source.*?(?:\n|$)', '', text)
+        
+        # Удаляем строки с кнопками шаринга
+        text = re.sub(r'(?i)share this.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)share on.*?(?:\n|$)', '', text)
+        
+        # Удаляем строки с именами социальных сетей (если они отдельно)
+        social_pattern = r'(?i)(?:facebook|twitter|linkedin|reddit|pinterest|whatsapp|telegram|email|print|cop(?:y|ied)).*?(?:\n|$)'
+        text = re.sub(social_pattern, '', text)
+        
+        # Удаляем пустые строки, которые могли образоваться
+        lines = text.split('\n')
+        cleaned_lines = [line for line in lines if line.strip()]
+        text = '\n'.join(cleaned_lines)
+        
+        return text.strip()
+    
     def get_apnews_articles(self, url):
         """Парсит страницу AP News и возвращает список свежих статей"""
         try:
@@ -220,7 +315,7 @@ class NewsBot:
                 ('div', 'PageList-items-item'),
                 ('div', 'Card'),
                 ('div', 'FeedCard'),
-                ('a', None)  # Для прямых ссылок
+                ('a', None)
             ]
             
             for tag, class_name in selectors:
@@ -236,11 +331,9 @@ class NewsBot:
                     
                     href = link['href']
                     
-                    # Проверяем, что это ссылка на статью
                     if not ('/article/' in href or 'apnews.com' in href):
                         continue
                     
-                    # Формируем полный URL
                     if href.startswith('/'):
                         full_url = 'https://apnews.com' + href
                     elif href.startswith('https://apnews.com'):
@@ -248,17 +341,15 @@ class NewsBot:
                     else:
                         continue
                     
-                    # Получаем заголовок
                     title = None
                     title_elem = elem.find(['h1', 'h2', 'h3', 'h4']) if tag != 'a' else elem
                     if title_elem:
                         title = self.clean_text(title_elem.get_text())
                     
                     if not title or len(title) < 15:
-                        # Пробуем получить текст ссылки
                         title = self.clean_text(link.get_text())
                     
-                    if title and len(title) > 15:
+                    if title and len(title) > 15 and not self.is_junk_text(title):
                         articles.append({
                             'url': full_url,
                             'title': title
@@ -273,14 +364,14 @@ class NewsBot:
                     unique_articles.append(article)
             
             logger.info(f"✅ Найдено {len(unique_articles)} статей на {url}")
-            return unique_articles[:3]  # Возвращаем первые 3 статьи
+            return unique_articles[:3]
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга AP News: {e}")
             return []
     
     def parse_apnews_article(self, url, source_name):
-        """Парсинг отдельной статьи AP News"""
+        """Парсинг отдельной статьи AP News с улучшенной фильтрацией"""
         try:
             logger.info(f"🌐 Парсинг статьи AP News: {url}")
             
@@ -300,24 +391,20 @@ class NewsBot:
             title_elem = soup.find('h1')
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
-                # Убираем " | AP News" из заголовка
                 title = re.sub(r'\s*\|\s*AP\s*News.*$', '', title)
                 title = re.sub(r'\s*-\s*AP\s*News.*$', '', title)
             
             # Изображение
             main_image = None
-            # Open Graph
             og_image = soup.find('meta', property='og:image')
             if og_image and og_image.get('content'):
                 main_image = og_image['content']
             
-            # Twitter
             if not main_image:
                 twitter_image = soup.find('meta', {'name': 'twitter:image'})
                 if twitter_image and twitter_image.get('content'):
                     main_image = twitter_image['content']
             
-            # Поиск изображения в статье
             if not main_image:
                 img = soup.find('img', class_=re.compile(r'image|photo|featured|Figure-image|LeadImage'))
                 if img and img.get('src'):
@@ -331,11 +418,10 @@ class NewsBot:
                     else:
                         main_image = 'https://apnews.com/' + img_src
             
-            # Текст статьи - ищем контейнер
+            # Текст статьи
             article_text = ""
             text_container = None
             
-            # Различные селекторы для текста
             selectors = [
                 'div.Article',
                 'div.Article-content',
@@ -357,23 +443,20 @@ class NewsBot:
             
             if text_container:
                 # Удаляем ненужные элементы
-                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure', 'nav', 'footer', 'iframe']):
+                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure', 'nav', 'footer', 'iframe', 'div[class*="share"]', 'div[class*="social"]']):
                     unwanted.decompose()
                 
                 # Собираем параграфы
                 paragraphs = []
                 for p in text_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
-                    if p_text and len(p_text) > 20:
-                        # Фильтруем служебные тексты
-                        lower_text = p_text.lower()
-                        if not any(word in lower_text for word in ['subscribe', 'newsletter', 'click here', 'read more', 'follow us', 'sign up']):
-                            paragraphs.append(p_text)
+                    if p_text and len(p_text) > 20 and not self.is_junk_text(p_text):
+                        paragraphs.append(p_text)
                 
                 if paragraphs:
                     article_text = '\n\n'.join(paragraphs)
             
-            # Fallback: если не нашли структурированный текст
+            # Если не нашли структурированный текст или он слишком короткий
             if len(article_text) < 200:
                 # Удаляем скрипты и стили
                 for script in soup(['script', 'style', 'nav', 'footer', 'header']):
@@ -382,15 +465,20 @@ class NewsBot:
                 # Получаем весь текст
                 all_text = self.clean_text(soup.get_text())
                 
-                # Ищем текст после заголовка
-                if title in all_text:
-                    start = all_text.find(title) + len(title)
-                    # Берем следующие 2000 символов
-                    article_text = all_text[start:start + 2000].strip()
-                    # Обрезаем по последнему предложению
-                    last_sentence = article_text.rfind('. ')
-                    if last_sentence > 1000:
-                        article_text = article_text[:last_sentence + 1]
+                # Разбиваем на строки и фильтруем
+                lines = all_text.split('\n')
+                filtered_lines = []
+                
+                for line in lines:
+                    line = line.strip()
+                    if line and len(line) > 20 and not self.is_junk_text(line):
+                        filtered_lines.append(line)
+                
+                if filtered_lines:
+                    article_text = '\n\n'.join(filtered_lines[:15])  # Берем первые 15 строк
+            
+            # Дополнительная очистка от служебной информации
+            article_text = self.clean_apnews_content(article_text)
             
             if len(article_text) < 200:
                 logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
@@ -454,10 +542,8 @@ class NewsBot:
                 paragraphs = []
                 for p in text_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
-                    if p_text and len(p_text) > 15:
-                        lower_text = p_text.lower()
-                        if not any(skip in lower_text for skip in ['subscribe', 'follow us', 'share this']):
-                            paragraphs.append(p_text)
+                    if p_text and len(p_text) > 15 and not self.is_junk_text(p_text):
+                        paragraphs.append(p_text)
                 
                 if paragraphs:
                     article_text = '\n\n'.join(paragraphs)
@@ -524,7 +610,7 @@ class NewsBot:
                 paragraphs = []
                 for p in text_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
-                    if p_text and len(p_text) > 15:
+                    if p_text and len(p_text) > 15 and not self.is_junk_text(p_text):
                         paragraphs.append(p_text)
                 
                 if paragraphs:
@@ -551,7 +637,6 @@ class NewsBot:
             
             logger.info(f"🔄 {source_name} (прямой парсинг)")
             
-            # Получаем список статей со страницы
             articles = await asyncio.get_event_loop().run_in_executor(
                 None, self.get_apnews_articles, url
             )
@@ -561,7 +646,7 @@ class NewsBot:
                 return []
             
             news_items = []
-            for article in articles[:1]:  # Берем только первую статью
+            for article in articles[:1]:
                 article_url = article['url']
                 article_title = article['title']
                 
@@ -615,7 +700,7 @@ class NewsBot:
             logger.info(f"📰 В RSS {len(feed.entries)} статей")
             
             news_items = []
-            for entry in feed.entries[:1]:  # Берем только самую свежую
+            for entry in feed.entries[:1]:
                 link = entry.get('link', '')
                 title = entry.get('title', 'Без заголовка')
                 
@@ -654,7 +739,6 @@ class NewsBot:
         """Сбор новостей из всех источников"""
         all_news = []
         
-        # Получаем источники для сегодняшнего дня
         today_feeds = get_today_feeds()
         
         for feed in today_feeds:
@@ -756,7 +840,7 @@ class NewsBot:
             return paragraph[:max_length]
     
     def build_caption_with_smart_truncation(self, title, paragraphs, max_length=TELEGRAM_MAX_CAPTION):
-        """Создание подписи с умной обрезкой (без дублирования заголовка)"""
+        """Создание подписи с умной обрезкой"""
         title_part = f"<b>{title}</b>"
         current_text = title_part
         current_length = len(title_part)
@@ -783,7 +867,7 @@ class NewsBot:
                 added_any_text = True
                 logger.info(f"✅ Добавлен абзац {i+1} целиком ({len(para)} символов)")
             else:
-                if i == 0:  # Пробуем обрезать только первый абзац
+                if i == 0:
                     max_para_length = available_for_text - current_length - len(separator)
                     truncated_para = self.truncate_first_paragraph_by_sentences(para, max_para_length)
                     
@@ -846,130 +930,4 @@ class NewsBot:
     async def publish_post(self, post_data):
         """Публикация поста в Telegram"""
         try:
-            if post_data['image_path']:
-                with open(post_data['image_path'], 'rb') as photo:
-                    await self.bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=photo,
-                        caption=post_data['caption'],
-                        parse_mode='HTML'
-                    )
-                try:
-                    os.unlink(post_data['image_path'])
-                except:
-                    pass
-                logger.info("✅ Пост опубликован")
-                return True
-            else:
-                await self.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=post_data['caption'],
-                    parse_mode='HTML'
-                )
-                return True
-                
-        except TelegramError as e:
-            if "Too Many Requests" in str(e):
-                logger.warning("⚠️ Лимит Telegram, жду 1 час...")
-                await asyncio.sleep(3600)
-            elif "Can't parse entities" in str(e):
-                logger.warning("⚠️ Ошибка HTML, отправляю без форматирования")
-                plain_text = re.sub(r'<[^>]+>', '', post_data['caption'])
-                await self.bot.send_message(chat_id=CHANNEL_ID, text=plain_text)
-                return True
-            else:
-                logger.error(f"❌ Ошибка Telegram: {e}")
-            return False
-    
-    async def check_and_publish(self):
-        """Проверка и публикация новостей"""
-        logger.info("=" * 60)
-        logger.info("🔍 ПРОВЕРКА НОВОСТЕЙ")
-        logger.info("=" * 60)
-        
-        if not self.can_post_now():
-            logger.info("⏳ Нельзя публиковать сейчас")
-            return
-        
-        news_items = await self.fetch_all_news()
-        
-        if not news_items:
-            logger.info("📭 Новых статей нет")
-            return
-        
-        published = 0
-        
-        for item in news_items:
-            if not self.can_post_now():
-                logger.info("⏳ Лимит достигнут")
-                break
-            
-            logger.info(f"\n📝 Публикую: {item['title'][:50]}...")
-            
-            post_data = await self.create_single_post(item)
-            
-            if post_data:
-                success = await self.publish_post(post_data)
-                
-                if success:
-                    self.sent_links.add(item['link'])
-                    self.save_json(SENT_LINKS_FILE, self.sent_links)
-                    self.log_post(item['link'], item['title'])
-                    published += 1
-                    
-                    if published < len(news_items):
-                        pause = MIN_POST_INTERVAL + random.randint(-120, 300)
-                        logger.info(f"⏱ Пауза {pause//60} минут...")
-                        await asyncio.sleep(pause)
-        
-        logger.info(f"\n📊 Опубликовано: {published}")
-    
-    async def start(self):
-        """Запуск бота"""
-        logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.13 - ЕДИНЫЕ ПРАВИЛА ПУБЛИКАЦИИ")
-        logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
-        logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
-        logger.info(f"📏 Лимит подписи: {TELEGRAM_MAX_CAPTION}")
-        logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
-        
-        # Показываем, какие источники будут использоваться сегодня
-        today_feeds = get_today_feeds()
-        logger.info("📡 Источники сегодня:")
-        for feed in today_feeds:
-            if feed['enabled']:
-                logger.info(f"   - {feed['name']}")
-        
-        logger.info("=" * 70)
-        
-        try:
-            me = await self.bot.get_me()
-            logger.info(f"✅ Бот @{me.username}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return
-        
-        await self.check_and_publish()
-        
-        self.scheduler.add_job(
-            self.check_and_publish,
-            'interval',
-            seconds=CHECK_INTERVAL
-        )
-        self.scheduler.start()
-        logger.info(f"✅ Планировщик запущен")
-        
-        try:
-            while True:
-                await asyncio.sleep(60)
-        except KeyboardInterrupt:
-            if self.session:
-                await self.session.close()
-
-async def main():
-    bot = NewsBot()
-    await bot.start()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            if post_data['image_path
