@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 8.11
-С ПРЯМЫМ ПАРСИНГОМ AP NEWS (БЕЗ RSS)
+🤖 Telegram News Bot - Версия 8.12
+С ИСПРАВЛЕННЫМ ПАРСЕРОМ AP NEWS
 - UTC+7 часовой пояс
 - Без указания источника
 - Умная обрезка текста
@@ -59,11 +59,18 @@ WEEKDAY_FEEDS = [
     }
 ]
 
-# Источники для выходных (прямой парсинг HTML вместо RSS)
+# Источники для выходных (прямой парсинг HTML)
 WEEKEND_FEEDS = [
     {
         'name': 'AP Top News',
         'url': 'https://apnews.com/',
+        'enabled': True,
+        'parser': 'apnews_list',
+        'type': 'html'
+    },
+    {
+        'name': 'AP World News',
+        'url': 'https://apnews.com/world-news',
         'enabled': True,
         'parser': 'apnews_list',
         'type': 'html'
@@ -186,16 +193,19 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
     
-    def get_apnews_articles(self):
-        """Парсит главную страницу AP News и возвращает список свежих статей"""
+    def get_apnews_articles(self, url):
+        """Парсит страницу AP News и возвращает список свежих статей"""
         try:
-            logger.info("🌐 Парсинг главной страницы AP News")
+            logger.info(f"🌐 Парсинг AP News: {url}")
             
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
             }
             
-            response = requests.get('https://apnews.com/', headers=headers, timeout=15)
+            response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка загрузки AP News: {response.status_code}")
                 return []
@@ -203,28 +213,90 @@ class NewsBot:
             soup = BeautifulSoup(response.text, 'html.parser')
             
             articles = []
-            # Ищем ссылки на статьи
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                # Нас интересуют ссылки на статьи (обычно содержат /article/)
-                if '/article/' in href and not href.startswith('http'):
-                    full_url = 'https://apnews.com' + href
-                    
-                    # Получаем заголовок из ссылки или из соседнего элемента
-                    title = link.get_text(strip=True)
-                    if not title or len(title) < 10:
-                        # Пробуем найти заголовок в родительском элементе
-                        parent = link.find_parent(['h2', 'h3', 'div'])
-                        if parent:
-                            title = parent.get_text(strip=True)
-                    
-                    if title and len(title) > 15 and full_url not in [a['url'] for a in articles]:
-                        articles.append({
-                            'url': full_url,
-                            'title': title
-                        })
             
-            # Убираем дубликаты и оставляем уникальные
+            # AP News использует различные селекторы для статей
+            # Пробуем разные варианты поиска ссылок на статьи
+            
+            # Вариант 1: Поиск по тегам article
+            for article in soup.find_all('article'):
+                link = article.find('a', href=True)
+                if link:
+                    href = link['href']
+                    if href.startswith('/'):
+                        full_url = 'https://apnews.com' + href
+                    elif href.startswith('https://apnews.com'):
+                        full_url = href
+                    else:
+                        continue
+                    
+                    # Ищем заголовок
+                    title_elem = article.find(['h1', 'h2', 'h3', 'h4'])
+                    if title_elem:
+                        title = self.clean_text(title_elem.get_text())
+                        if title and len(title) > 10:
+                            articles.append({
+                                'url': full_url,
+                                'title': title
+                            })
+            
+            # Вариант 2: Поиск по классам
+            if not articles:
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    if '/article/' in href:
+                        if href.startswith('/'):
+                            full_url = 'https://apnews.com' + href
+                        else:
+                            full_url = href
+                        
+                        # Проверяем, не добавили ли уже эту ссылку
+                        if full_url in [a['url'] for a in articles]:
+                            continue
+                        
+                        # Получаем заголовок
+                        title = link.get_text(strip=True)
+                        if not title or len(title) < 15:
+                            # Пробуем найти заголовок рядом
+                            parent = link.find_parent(['h2', 'h3', 'div', 'li'])
+                            if parent:
+                                title = parent.get_text(strip=True)
+                        
+                        if title and len(title) > 15:
+                            articles.append({
+                                'url': full_url,
+                                'title': title
+                            })
+            
+            # Вариант 3: Поиск по структуре AP News (специфические классы)
+            if not articles:
+                selectors = [
+                    'div.PagePromo',
+                    'div.PageList-items-item',
+                    'div.Card',
+                    'div.FeedCard'
+                ]
+                
+                for selector in selectors:
+                    for item in soup.select(selector):
+                        link = item.find('a', href=True)
+                        if link:
+                            href = link['href']
+                            if '/article/' in href:
+                                if href.startswith('/'):
+                                    full_url = 'https://apnews.com' + href
+                                else:
+                                    full_url = href
+                                
+                                title_elem = item.find(['h2', 'h3', 'h4'])
+                                if title_elem:
+                                    title = self.clean_text(title_elem.get_text())
+                                    if title and len(title) > 10:
+                                        articles.append({
+                                            'url': full_url,
+                                            'title': title
+                                        })
+            
+            # Убираем дубликаты
             unique_articles = []
             seen_urls = set()
             for article in articles:
@@ -232,11 +304,13 @@ class NewsBot:
                     seen_urls.add(article['url'])
                     unique_articles.append(article)
             
-            logger.info(f"✅ Найдено {len(unique_articles)} статей на главной AP News")
-            return unique_articles[:5]  # Возвращаем первые 5 статей
+            logger.info(f"✅ Найдено {len(unique_articles)} статей на {url}")
+            return unique_articles[:3]  # Возвращаем первые 3 статьи
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга AP News: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def parse_apnews_article(self, url, source_name):
@@ -245,7 +319,8 @@ class NewsBot:
             logger.info(f"🌐 Парсинг статьи AP News: {url}")
             
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             }
             
             response = requests.get(url, headers=headers, timeout=15)
@@ -260,44 +335,94 @@ class NewsBot:
             title_elem = soup.find('h1')
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
+                # Убираем лишнее из заголовка
                 title = re.sub(r'\s*\|\s*AP\s*News.*$', '', title)
+                title = re.sub(r'\s*-\s*AP\s*News.*$', '', title)
             
-            # Изображение
+            # Изображение - несколько способов найти
             main_image = None
-            img_elem = soup.find('meta', property='og:image')
-            if img_elem and img_elem.get('content'):
-                main_image = img_elem['content']
+            
+            # Способ 1: Open Graph мета-теги
+            og_image = soup.find('meta', property='og:image')
+            if og_image and og_image.get('content'):
+                main_image = og_image['content']
+            
+            # Способ 2: Twitter мета-теги
+            if not main_image:
+                twitter_image = soup.find('meta', {'name': 'twitter:image'})
+                if twitter_image and twitter_image.get('content'):
+                    main_image = twitter_image['content']
+            
+            # Способ 3: Поиск изображения в статье
+            if not main_image:
+                img = soup.find('img', class_=re.compile(r'image|photo|featured|Figure-image|LeadImage'))
+                if img and img.get('src'):
+                    img_src = img['src']
+                    if img_src.startswith('//'):
+                        main_image = 'https:' + img_src
+                    elif img_src.startswith('/'):
+                        main_image = 'https://apnews.com' + img_src
+                    else:
+                        main_image = img_src
             
             # Текст статьи
             article_text = ""
+            
             # Пробуем найти контейнер с текстом
-            text_container = (
-                soup.find('div', class_=re.compile(r'Article')) or
-                soup.find('div', class_=re.compile(r'story-body')) or
-                soup.find('div', class_=re.compile(r'content')) or
-                soup.find('article')
-            )
+            text_container = None
+            selectors = [
+                'div.Article',
+                'div.Article-content',
+                'div.StoryBody',
+                'div.story-body',
+                'div.content',
+                'article',
+                'div.body-text',
+                'div.body-copy',
+                'div[class*="article-body"]',
+                'div[class*="story-body"]'
+            ]
+            
+            for selector in selectors:
+                container = soup.select_one(selector)
+                if container:
+                    text_container = container
+                    break
             
             if text_container:
-                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure', 'nav']):
+                # Удаляем ненужные элементы
+                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure', 'nav', 'footer', 'iframe']):
                     unwanted.decompose()
                 
+                # Собираем параграфы
                 paragraphs = []
                 for p in text_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
                     if p_text and len(p_text) > 20:
-                        paragraphs.append(p_text)
+                        # Фильтруем служебные тексты
+                        lower_text = p_text.lower()
+                        if not any(word in lower_text for word in ['subscribe', 'newsletter', 'click here', 'read more', 'follow us']):
+                            paragraphs.append(p_text)
                 
                 if paragraphs:
                     article_text = '\n\n'.join(paragraphs)
             
+            # Fallback: если не нашли параграфы, берем весь текст
             if len(article_text) < 200:
-                # Fallback: берем весь текст страницы
+                # Удаляем скрипты и стили из всего документа
+                for script in soup(['script', 'style', 'nav', 'footer']):
+                    script.decompose()
+                
                 all_text = self.clean_text(soup.get_text())
+                
                 # Пытаемся найти начало статьи
                 if title in all_text:
                     start = all_text.find(title) + len(title)
+                    # Берем следующий текст после заголовка
                     article_text = all_text[start:start + 2000].strip()
+                else:
+                    # Просто берем первые 2000 символов
+                    article_text = all_text[:2000].strip()
             
             if len(article_text) < 200:
                 logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
@@ -313,6 +438,8 @@ class NewsBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга статьи AP News: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def parse_infobrics(self, url, source_name):
@@ -450,41 +577,44 @@ class NewsBot:
             logger.error(f"❌ Ошибка парсинга Global Research: {e}")
             return None
     
-    async def fetch_from_apnews(self):
-        """Получение свежих статей с AP News (без RSS)"""
+    async def fetch_from_apnews(self, feed_config):
+        """Получение свежих статей с AP News"""
         try:
-            logger.info("🔄 AP News (прямой парсинг)")
+            url = feed_config['url']
+            source_name = feed_config['name']
             
-            # Получаем список статей с главной
+            logger.info(f"🔄 {source_name} (прямой парсинг)")
+            
+            # Получаем список статей со страницы
             articles = await asyncio.get_event_loop().run_in_executor(
-                None, self.get_apnews_articles
+                None, self.get_apnews_articles, url
             )
             
             if not articles:
-                logger.warning("⚠️ Не удалось получить список статей с AP News")
+                logger.warning(f"⚠️ Не удалось получить список статей с {url}")
                 return []
             
             news_items = []
-            for article in articles[:1]:  # Берем только первую статью
-                url = article['url']
-                title = article['title']
+            for article in articles[:1]:  # Берем только первую статью для экономии времени
+                article_url = article['url']
+                article_title = article['title']
                 
-                if url in self.sent_links:
-                    logger.info(f"⏭️ Уже опубликовано: {title[:50]}...")
+                if article_url in self.sent_links:
+                    logger.info(f"⏭️ Уже опубликовано: {article_title[:50]}...")
                     continue
                 
-                logger.info(f"🔍 Новая статья: {title[:50]}...")
+                logger.info(f"🔍 Новая статья: {article_title[:50]}...")
                 
                 article_data = await asyncio.get_event_loop().run_in_executor(
-                    None, self.parse_apnews_article, url, "AP News"
+                    None, self.parse_apnews_article, article_url, source_name
                 )
                 
                 if article_data:
                     news_items.append({
-                        'source': 'AP News',
+                        'source': source_name,
                         'title': article_data['title'],
                         'content': article_data['content'],
-                        'link': url,
+                        'link': article_url,
                         'main_image': article_data.get('main_image')
                     })
                     logger.info(f"✅ Статья успешно спарсена")
@@ -495,6 +625,8 @@ class NewsBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка в fetch_from_apnews: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     async def fetch_from_rss(self, feed_config):
@@ -558,10 +690,8 @@ class NewsBot:
         for feed in today_feeds:
             if feed['enabled']:
                 if feed.get('type') == 'html':
-                    # Для AP News используем прямой парсинг
-                    news = await self.fetch_from_apnews()
+                    news = await self.fetch_from_apnews(feed)
                 else:
-                    # Для остальных - RSS
                     news = await self.fetch_from_rss(feed)
                 
                 all_news.extend(news)
@@ -831,7 +961,7 @@ class NewsBot:
     
     async def start(self):
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.11 - ПРЯМОЙ ПАРСИНГ AP NEWS")
+        logger.info("🚀 NEWS BOT 8.12 - УЛУЧШЕННЫЙ ПАРСИНГ AP NEWS")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
