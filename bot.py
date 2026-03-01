@@ -930,4 +930,129 @@ class NewsBot:
     async def publish_post(self, post_data):
         """Публикация поста в Telegram"""
         try:
-            if post_data['image_path
+            if post_data['image_path']:
+                with open(post_data['image_path'], 'rb') as photo:
+                    await self.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=photo,
+                        caption=post_data['caption'],
+                        parse_mode='HTML'
+                    )
+                try:
+                    os.unlink(post_data['image_path'])
+                except:
+                    pass
+                logger.info("✅ Пост опубликован")
+                return True
+            else:
+                await self.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=post_data['caption'],
+                    parse_mode='HTML'
+                )
+                return True
+                
+        except TelegramError as e:
+            if "Too Many Requests" in str(e):
+                logger.warning("⚠️ Лимит Telegram, жду 1 час...")
+                await asyncio.sleep(3600)
+            elif "Can't parse entities" in str(e):
+                logger.warning("⚠️ Ошибка HTML, отправляю без форматирования")
+                plain_text = re.sub(r'<[^>]+>', '', post_data['caption'])
+                await self.bot.send_message(chat_id=CHANNEL_ID, text=plain_text)
+                return True
+            else:
+                logger.error(f"❌ Ошибка Telegram: {e}")
+            return False
+    
+    async def check_and_publish(self):
+        """Проверка и публикация новостей"""
+        logger.info("=" * 60)
+        logger.info("🔍 ПРОВЕРКА НОВОСТЕЙ")
+        logger.info("=" * 60)
+        
+        if not self.can_post_now():
+            logger.info("⏳ Нельзя публиковать сейчас")
+            return
+        
+        news_items = await self.fetch_all_news()
+        
+        if not news_items:
+            logger.info("📭 Новых статей нет")
+            return
+        
+        published = 0
+        
+        for item in news_items:
+            if not self.can_post_now():
+                logger.info("⏳ Лимит достигнут")
+                break
+            
+            logger.info(f"\n📝 Публикую: {item['title'][:50]}...")
+            
+            post_data = await self.create_single_post(item)
+            
+            if post_data:
+                success = await self.publish_post(post_data)
+                
+                if success:
+                    self.sent_links.add(item['link'])
+                    self.save_json(SENT_LINKS_FILE, self.sent_links)
+                    self.log_post(item['link'], item['title'])
+                    published += 1
+                    
+                    if published < len(news_items):
+                        pause = MIN_POST_INTERVAL + random.randint(-120, 300)
+                        logger.info(f"⏱ Пауза {pause//60} минут...")
+                        await asyncio.sleep(pause)
+        
+        logger.info(f"\n📊 Опубликовано: {published}")
+    
+    async def start(self):
+        """Запуск бота"""
+        logger.info("=" * 70)
+        logger.info("🚀 NEWS BOT 8.14 - УЛУЧШЕННАЯ ФИЛЬТРАЦИЯ ТЕКСТА")
+        logger.info(f"📢 Канал: {CHANNEL_ID}")
+        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
+        logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
+        logger.info(f"📏 Лимит подписи: {TELEGRAM_MAX_CAPTION}")
+        logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
+        
+        today_feeds = get_today_feeds()
+        logger.info("📡 Источники сегодня:")
+        for feed in today_feeds:
+            if feed['enabled']:
+                logger.info(f"   - {feed['name']}")
+        
+        logger.info("=" * 70)
+        
+        try:
+            me = await self.bot.get_me()
+            logger.info(f"✅ Бот @{me.username}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return
+        
+        await self.check_and_publish()
+        
+        self.scheduler.add_job(
+            self.check_and_publish,
+            'interval',
+            seconds=CHECK_INTERVAL
+        )
+        self.scheduler.start()
+        logger.info(f"✅ Планировщик запущен")
+        
+        try:
+            while True:
+                await asyncio.sleep(60)
+        except KeyboardInterrupt:
+            if self.session:
+                await self.session.close()
+
+async def main():
+    bot = NewsBot()
+    await bot.start()
+
+if __name__ == "__main__":
+    asyncio.run(main())
