@@ -1,10 +1,10 @@
 """
-🤖 Telegram News Bot - Версия 8.9
+🤖 Telegram News Bot - Версия 8.10
 С РАБОЧИМИ RSS AP NEWS
 - UTC+7 часовой пояс
 - Без указания источника
 - Умная обрезка текста
-- AP News только в выходные (рабочие RSS)
+- AP News только в выходные
 """
 
 import os
@@ -61,13 +61,13 @@ WEEKDAY_FEEDS = [
 WEEKEND_FEEDS = [
     {
         'name': 'AP Top News',
-        'url': 'https://simplepie.ap.org/topnews/feed.xml',
+        'url': 'http://hosted2.ap.org/atom/APDEFAULT/3d281c11a96b4ad082fe88aa0db04305',
         'enabled': True,
         'parser': 'apnews'
     },
     {
         'name': 'AP World News',
-        'url': 'https://simplepie.ap.org/world/feed.xml',
+        'url': 'http://hosted2.ap.org/atom/APDEFAULT/cae69a7523db45408eeb2b3a98c0c9c5',
         'enabled': True,
         'parser': 'apnews'
     }
@@ -195,11 +195,12 @@ class NewsBot:
             logger.info(f"🌐 Парсинг {source_name}: {url}")
             
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
             
             response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
+                logger.error(f"❌ Ошибка загрузки: HTTP {response.status_code}")
                 return None
             
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -214,6 +215,7 @@ class NewsBot:
                 title = self.clean_text(title_elem.get_text())
                 # Убираем " | AP News" из заголовка если есть
                 title = re.sub(r'\s*\|\s*AP\s*News.*$', '', title)
+                title = re.sub(r'\s*-\s*AP\s*News.*$', '', title)
             
             # Изображение
             main_image = None
@@ -221,7 +223,7 @@ class NewsBot:
             if img_elem and img_elem.get('content'):
                 main_image = img_elem['content']
             else:
-                img_elem = soup.find('img', class_=re.compile(r'image|photo|featured'))
+                img_elem = soup.find('img', class_=re.compile(r'image|photo|featured|Figure-image'))
                 if img_elem and img_elem.get('src'):
                     img_src = img_elem['src']
                     if img_src.startswith('/'):
@@ -233,22 +235,43 @@ class NewsBot:
                     else:
                         main_image = img_src
             
-            # Текст - AP News использует структуру article
+            # Текст
             article_text = ""
-            text_container = soup.find('article') or soup.find('div', class_=re.compile(r'Article|story-body|content'))
+            # AP News использует разные структуры
+            text_container = (
+                soup.find('div', class_=re.compile(r'Article')) or
+                soup.find('div', class_=re.compile(r'story-body')) or
+                soup.find('div', class_=re.compile(r'content')) or
+                soup.find('article')
+            )
             
             if text_container:
-                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure']):
+                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure', 'nav']):
                     unwanted.decompose()
                 
                 paragraphs = []
                 for p in text_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
-                    if p_text and len(p_text) > 20:  # Чуть больше фильтр
+                    if p_text and len(p_text) > 20:
                         paragraphs.append(p_text)
                 
                 if paragraphs:
                     article_text = '\n\n'.join(paragraphs)
+            
+            if len(article_text) < 200:
+                # Пробуем найти текст в другом месте
+                all_text = soup.get_text()
+                # Очищаем и берем первые 500 символов для проверки
+                all_text = self.clean_text(all_text)
+                if len(all_text) > 500:
+                    # Пытаемся найти начало статьи (обычно после заголовка)
+                    title_pos = all_text.find(title)
+                    if title_pos != -1:
+                        article_text = all_text[title_pos + len(title):]
+                        # Берем первые 1000 символов
+                        article_text = article_text[:1000].strip()
+                        if article_text:
+                            logger.info(f"✅ Текст найден через fallback: {len(article_text)} символов")
             
             if len(article_text) < 200:
                 logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
@@ -264,6 +287,8 @@ class NewsBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга AP News: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def parse_infobrics(self, url, source_name):
@@ -419,7 +444,7 @@ class NewsBot:
             
             logger.info(f"🔄 {source_name} (парсер: {parser_name})")
             
-            # Парсим RSS
+            # Парсим RSS с таймаутом
             feed = feedparser.parse(feed_url)
             
             if feed.bozo:
@@ -743,7 +768,7 @@ class NewsBot:
     
     async def start(self):
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.9 - РАБОЧИЕ RSS AP NEWS")
+        logger.info("🚀 NEWS BOT 8.10 - РАБОЧИЕ RSS AP NEWS")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
