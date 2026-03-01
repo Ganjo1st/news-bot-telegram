@@ -929,4 +929,47 @@ class NewsBot:
         logger.info("=" * 70)
         logger.info("🚀 NEWS BOT 8.13 - ЕДИНЫЕ ПРАВИЛА ПУБЛИКАЦИИ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч
+        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
+        logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
+        logger.info(f"📏 Лимит подписи: {TELEGRAM_MAX_CAPTION}")
+        logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
+        
+        # Показываем, какие источники будут использоваться сегодня
+        today_feeds = get_today_feeds()
+        logger.info("📡 Источники сегодня:")
+        for feed in today_feeds:
+            if feed['enabled']:
+                logger.info(f"   - {feed['name']}")
+        
+        logger.info("=" * 70)
+        
+        try:
+            me = await self.bot.get_me()
+            logger.info(f"✅ Бот @{me.username}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return
+        
+        await self.check_and_publish()
+        
+        self.scheduler.add_job(
+            self.check_and_publish,
+            'interval',
+            seconds=CHECK_INTERVAL
+        )
+        self.scheduler.start()
+        logger.info(f"✅ Планировщик запущен")
+        
+        try:
+            while True:
+                await asyncio.sleep(60)
+        except KeyboardInterrupt:
+            if self.session:
+                await self.session.close()
+
+async def main():
+    bot = NewsBot()
+    await bot.start()
+
+if __name__ == "__main__":
+    asyncio.run(main())
