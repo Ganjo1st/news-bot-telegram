@@ -1,9 +1,10 @@
 """
-🤖 Telegram News Bot - Версия 8.7
-ПОЛНОСТЬЮ РАБОЧАЯ ВЕРСИЯ
-- Учет часового пояса UTC+7
+🤖 Telegram News Bot - Версия 8.8
+С AP NEWS ПО ВЫХОДНЫМ
+- UTC+7 часовой пояс
 - Без указания источника
 - Умная обрезка текста
+- AP News только в выходные
 """
 
 import os
@@ -40,19 +41,52 @@ MIN_POST_INTERVAL = 600  # Базовая пауза 10 минут
 MAX_POSTS_PER_DAY = 20   # Лимит постов в день
 TIMEZONE_OFFSET = 7      # Смещение для UTC+7
 
-# Источники
-RSS_FEEDS = [
+# Основные источники (будние дни)
+WEEKDAY_FEEDS = [
     {
         'name': 'InfoBrics',
         'url': 'https://infobrics.org/rss/en',
-        'enabled': True
+        'enabled': True,
+        'parser': 'infobrics'
     },
     {
         'name': 'Global Research',
         'url': 'https://www.globalresearch.ca/feed',
-        'enabled': True
+        'enabled': True,
+        'parser': 'globalresearch'
     }
 ]
+
+# Источники для выходных
+WEEKEND_FEEDS = [
+    {
+        'name': 'AP News',
+        'url': 'https://apnews.com/apf-topnews?utm_source=feedburner&utm_medium=feed&utm_campaign=Feed%3A+apnews%2FApTopNews+%28AP+Top+News%29',
+        'enabled': True,
+        'parser': 'apnews'
+    },
+    {
+        'name': 'AP World News',
+        'url': 'https://apnews.com/world-news?utm_source=feedburner&utm_medium=feed&utm_campaign=Feed%3A+apnews%2FApWorldNews+%28AP+World+News%29',
+        'enabled': True,
+        'parser': 'apnews'
+    }
+]
+
+# Определяем, какие источники использовать сегодня
+def get_today_feeds():
+    """Возвращает список источников в зависимости от дня недели"""
+    local_hour = (datetime.now().hour + TIMEZONE_OFFSET) % 24
+    local_date = datetime.now() + timedelta(hours=TIMEZONE_OFFSET)
+    weekday = local_date.weekday()  # 0-6: понедельник-воскресенье
+    
+    # Выходные: суббота (5) и воскресенье (6)
+    if weekday >= 5:
+        logger.info(f"📅 Сегодня выходной (день {weekday}), использую AP News")
+        return WEEKEND_FEEDS
+    else:
+        logger.info(f"📅 Сегодня будний день (день {weekday}), использую основные источники")
+        return WEEKDAY_FEEDS
 
 SENT_LINKS_FILE = 'sent_links.json'
 POSTS_LOG_FILE = 'posts_log.json'
@@ -98,7 +132,6 @@ class NewsBot:
     
     def can_post_now(self):
         """Проверка всех лимитов с учетом часового пояса UTC+7"""
-        # Корректируем время для UTC+7
         local_hour = (datetime.now().hour + TIMEZONE_OFFSET) % 24
         
         # Не публикуем с 23:00 до 07:00 по местному времени
@@ -157,7 +190,8 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
     
-    def parse_article(self, url, source_name):
+    def parse_apnews(self, url, source_name):
+        """Парсер для AP News"""
         try:
             logger.info(f"🌐 Парсинг {source_name}: {url}")
             
@@ -173,18 +207,86 @@ class NewsBot:
             
             # Заголовок
             title = "Без заголовка"
-            if 'infobrics' in url:
-                title_elem = soup.find('div', class_=re.compile(r'title.*big')) or soup.find('h1')
-            else:
-                title_elem = soup.find('h1')
+            title_elem = soup.find('h1')
+            if not title_elem:
+                title_elem = soup.find('title')
             
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
             
             # Изображение
             main_image = None
-            img_elem = soup.find('img', class_=re.compile(r'article.*image')) or soup.find('img', class_=re.compile(r'featured'))
+            img_elem = soup.find('meta', property='og:image')
+            if img_elem and img_elem.get('content'):
+                main_image = img_elem['content']
+            else:
+                img_elem = soup.find('img', class_=re.compile(r'image|photo|featured'))
+                if img_elem and img_elem.get('src'):
+                    img_src = img_elem['src']
+                    if img_src.startswith('/'):
+                        domain = url.split('/')[2]
+                        main_image = f"https://{domain}{img_src}"
+                    elif not img_src.startswith('http'):
+                        domain = url.split('/')[2]
+                        main_image = f"https://{domain}/{img_src}"
+                    else:
+                        main_image = img_src
             
+            # Текст
+            article_text = ""
+            # AP News часто использует article или div с классом Article
+            text_container = soup.find('article') or soup.find('div', class_=re.compile(r'Article|story-body|content'))
+            
+            if text_container:
+                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside']):
+                    unwanted.decompose()
+                
+                paragraphs = []
+                for p in text_container.find_all('p'):
+                    p_text = self.clean_text(p.get_text())
+                    if p_text and len(p_text) > 15:
+                        paragraphs.append(p_text)
+                
+                if paragraphs:
+                    article_text = '\n\n'.join(paragraphs)
+            
+            if len(article_text) < 200:
+                return None
+            
+            return {
+                'title': title,
+                'content': article_text,
+                'main_image': main_image
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга AP News: {e}")
+            return None
+    
+    def parse_infobrics(self, url, source_name):
+        """Парсер для InfoBrics"""
+        try:
+            logger.info(f"🌐 Парсинг {source_name}: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                return None
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Заголовок
+            title = "Без заголовка"
+            title_elem = soup.find('div', class_=re.compile(r'title.*big')) or soup.find('h1')
+            if title_elem:
+                title = self.clean_text(title_elem.get_text())
+            
+            # Изображение
+            main_image = None
+            img_elem = soup.find('img', class_=re.compile(r'article.*image'))
             if img_elem and img_elem.get('src'):
                 img_src = img_elem['src']
                 if img_src.startswith('/'):
@@ -198,7 +300,7 @@ class NewsBot:
             
             # Текст
             article_text = ""
-            text_container = soup.find('div', class_=re.compile(r'article__text|post-content|entry-content'))
+            text_container = soup.find('div', class_=re.compile(r'article__text')) or soup.find('div', class_=re.compile(r'article'))
             
             if text_container:
                 for unwanted in text_container.find_all(['script', 'style', 'button']):
@@ -225,20 +327,105 @@ class NewsBot:
             }
             
         except Exception as e:
-            logger.error(f"❌ Ошибка парсинга: {e}")
+            logger.error(f"❌ Ошибка парсинга InfoBrics: {e}")
             return None
+    
+    def parse_globalresearch(self, url, source_name):
+        """Парсер для Global Research"""
+        try:
+            logger.info(f"🌐 Парсинг {source_name}: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                return None
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Заголовок
+            title = "Без заголовка"
+            title_elem = soup.find('h1')
+            if not title_elem:
+                title_elem = soup.find('title')
+            
+            if title_elem:
+                title = self.clean_text(title_elem.get_text())
+            
+            # Изображение
+            main_image = None
+            img_elem = soup.find('img', class_=re.compile(r'featured|wp-post-image'))
+            if img_elem and img_elem.get('src'):
+                img_src = img_elem['src']
+                if img_src.startswith('/'):
+                    domain = url.split('/')[2]
+                    main_image = f"https://{domain}{img_src}"
+                elif not img_src.startswith('http'):
+                    domain = url.split('/')[2]
+                    main_image = f"https://{domain}/{img_src}"
+                else:
+                    main_image = img_src
+            
+            # Текст
+            article_text = ""
+            text_container = soup.find('div', class_=re.compile(r'entry-content|post-content'))
+            
+            if text_container:
+                for unwanted in text_container.find_all(['script', 'style', 'button']):
+                    unwanted.decompose()
+                
+                paragraphs = []
+                for p in text_container.find_all('p'):
+                    p_text = self.clean_text(p.get_text())
+                    if p_text and len(p_text) > 15:
+                        paragraphs.append(p_text)
+                
+                if paragraphs:
+                    article_text = '\n\n'.join(paragraphs)
+            
+            if len(article_text) < 200:
+                return None
+            
+            return {
+                'title': title,
+                'content': article_text,
+                'main_image': main_image
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга Global Research: {e}")
+            return None
+    
+    def get_parser(self, parser_name):
+        """Возвращает функцию парсера по имени"""
+        parsers = {
+            'apnews': self.parse_apnews,
+            'infobrics': self.parse_infobrics,
+            'globalresearch': self.parse_globalresearch
+        }
+        return parsers.get(parser_name, self.parse_apnews)
     
     async def fetch_news_from_feed(self, feed_config):
         try:
             feed_url = feed_config['url']
             source_name = feed_config['name']
+            parser_name = feed_config.get('parser', 'apnews')
+            parser_func = self.get_parser(parser_name)
             
-            logger.info(f"🔄 {source_name}")
+            logger.info(f"🔄 {source_name} (парсер: {parser_name})")
             
             feed = feedparser.parse(feed_url)
             
             if feed.bozo:
-                return []
+                logger.warning(f"⚠️ Ошибка RSS {source_name}, пробую запасной URL")
+                # Запасной URL для AP News
+                if 'apnews' in feed_url:
+                    alt_url = 'https://apnews.com/world-news'
+                    feed = feedparser.parse(alt_url)
+                    if feed.bozo:
+                        return []
             
             news_items = []
             for entry in feed.entries[:1]:
@@ -250,7 +437,7 @@ class NewsBot:
                 loop = asyncio.get_event_loop()
                 article_data = await loop.run_in_executor(
                     None, 
-                    self.parse_article, 
+                    parser_func, 
                     link, 
                     source_name
                 )
@@ -275,7 +462,10 @@ class NewsBot:
     async def fetch_all_news(self):
         all_news = []
         
-        for feed in RSS_FEEDS:
+        # Получаем источники для сегодняшнего дня
+        today_feeds = get_today_feeds()
+        
+        for feed in today_feeds:
             if feed['enabled']:
                 news = await self.fetch_news_from_feed(feed)
                 all_news.extend(news)
@@ -544,12 +734,20 @@ class NewsBot:
     
     async def start(self):
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.7 - UTC+7, БЕЗ ИСТОЧНИКА")
+        logger.info("🚀 NEWS BOT 8.8 - С AP NEWS ПО ВЫХОДНЫМ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
         logger.info(f"📏 Лимит подписи: {TELEGRAM_MAX_CAPTION}")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
+        
+        # Показываем, какие источники будут использоваться сегодня
+        today_feeds = get_today_feeds()
+        logger.info("📡 Источники сегодня:")
+        for feed in today_feeds:
+            if feed['enabled']:
+                logger.info(f"   - {feed['name']}")
+        
         logger.info("=" * 70)
         
         try:
