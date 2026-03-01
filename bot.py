@@ -1,10 +1,10 @@
 """
-🤖 Telegram News Bot - Версия 8.14
-С УЛУЧШЕННОЙ ФИЛЬТРАЦИЕЙ ТЕКСТА
+🤖 Telegram News Bot - Версия 8.15
+С ПРАВИЛЬНЫМ ВЫДЕЛЕНИЕМ ОДНОЙ СТАТЬИ
 - UTC+7 часовой пояс
 - Без указания источника
-- Умная обрезка текста
-- Очистка от служебной информации
+- Умная обрезка текста до 1024 символов
+- Только одна статья в посте
 """
 
 import os
@@ -194,10 +194,10 @@ class NewsBot:
         return text
     
     def is_junk_text(self, text):
-        """Проверяет, является ли текст служебным (не частью статьи)"""
+        """Проверяет, является ли текст служебным"""
         text_lower = text.lower()
         
-        # Список маркеров служебного текста
+        # Маркеры служебного текста
         junk_markers = [
             'subscribe',
             'newsletter',
@@ -242,26 +242,37 @@ class NewsBot:
             'about us',
             'advertise',
             'careers',
-            'press releases'
+            'press releases',
+            'what to know',
+            'check your news',
+            'news i.q.',
+            'sign up for',
+            'morning briefing',
+            'evening briefing',
+            'daily newsletter',
+            'week in review',
+            'you may have missed',
+            'catch up on',
+            'quiz:'
         ]
         
         for marker in junk_markers:
             if marker in text_lower:
                 return True
         
-        # Проверяем на очень короткий текст (менее 20 символов)
-        if len(text) < 20:
+        # Проверка на очень короткий текст
+        if len(text) < 25:
             return True
         
-        # Проверяем на наличие множества специальных символов (обычно в кнопках шаринга)
+        # Проверка на множество спецсимволов
         special_chars = sum(1 for c in text if not c.isalnum() and not c.isspace())
-        if len(text) > 0 and special_chars / len(text) > 0.3:  # >30% спецсимволов
+        if len(text) > 0 and special_chars / len(text) > 0.25:
             return True
         
         return False
     
     def clean_apnews_content(self, text):
-        """Дополнительная очистка текста AP News от служебной информации"""
+        """Очистка текста AP News от служебной информации"""
         # Удаляем строки с информацией о редакторах
         text = re.sub(r'(?i)edited by.*?(?:\n|$)', '', text)
         text = re.sub(r'(?i)editor:.*?(?:\n|$)', '', text)
@@ -272,16 +283,27 @@ class NewsBot:
         text = re.sub(r'(?i)add ap news.*?(?:\n|$)', '', text)
         text = re.sub(r'(?i)add to google.*?(?:\n|$)', '', text)
         text = re.sub(r'(?i)preferred source.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)sign up for.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)morning briefing.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)evening briefing.*?(?:\n|$)', '', text)
         
         # Удаляем строки с кнопками шаринга
         text = re.sub(r'(?i)share this.*?(?:\n|$)', '', text)
         text = re.sub(r'(?i)share on.*?(?:\n|$)', '', text)
         
-        # Удаляем строки с именами социальных сетей (если они отдельно)
+        # Удаляем строки с именами соцсетей
         social_pattern = r'(?i)(?:facebook|twitter|linkedin|reddit|pinterest|whatsapp|telegram|email|print|cop(?:y|ied)).*?(?:\n|$)'
         text = re.sub(social_pattern, '', text)
         
-        # Удаляем пустые строки, которые могли образоваться
+        # Удаляем строки с призывами к действию
+        text = re.sub(r'(?i)what to know.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)check your news.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)news i\.q\..*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)quiz:.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)you may have missed.*?(?:\n|$)', '', text)
+        text = re.sub(r'(?i)catch up on.*?(?:\n|$)', '', text)
+        
+        # Удаляем пустые строки
         lines = text.split('\n')
         cleaned_lines = [line for line in lines if line.strip()]
         text = '\n'.join(cleaned_lines)
@@ -295,8 +317,6 @@ class NewsBot:
             
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
             }
             
             response = requests.get(url, headers=headers, timeout=15)
@@ -308,52 +328,33 @@ class NewsBot:
             
             articles = []
             
-            # Поиск статей по различным селекторам
-            selectors = [
-                ('article', None),
-                ('div', 'PagePromo'),
-                ('div', 'PageList-items-item'),
-                ('div', 'Card'),
-                ('div', 'FeedCard'),
-                ('a', None)
-            ]
-            
-            for tag, class_name in selectors:
-                if class_name:
-                    elements = soup.find_all(tag, class_=re.compile(class_name))
-                else:
-                    elements = soup.find_all(tag)
+            # Поиск статей
+            for link in soup.find_all('a', href=True):
+                href = link['href']
                 
-                for elem in elements:
-                    link = elem if tag == 'a' else elem.find('a', href=True)
-                    if not link or not link.get('href'):
-                        continue
-                    
-                    href = link['href']
-                    
-                    if not ('/article/' in href or 'apnews.com' in href):
-                        continue
-                    
-                    if href.startswith('/'):
-                        full_url = 'https://apnews.com' + href
-                    elif href.startswith('https://apnews.com'):
-                        full_url = href
-                    else:
-                        continue
-                    
-                    title = None
-                    title_elem = elem.find(['h1', 'h2', 'h3', 'h4']) if tag != 'a' else elem
-                    if title_elem:
-                        title = self.clean_text(title_elem.get_text())
-                    
-                    if not title or len(title) < 15:
-                        title = self.clean_text(link.get_text())
-                    
-                    if title and len(title) > 15 and not self.is_junk_text(title):
-                        articles.append({
-                            'url': full_url,
-                            'title': title
-                        })
+                if '/article/' not in href:
+                    continue
+                
+                if href.startswith('/'):
+                    full_url = 'https://apnews.com' + href
+                elif href.startswith('https://apnews.com'):
+                    full_url = href
+                else:
+                    continue
+                
+                # Ищем родительский элемент с заголовком
+                parent = link.find_parent(['h2', 'h3', 'div', 'li'])
+                if parent:
+                    title_elem = parent.find(['h1', 'h2', 'h3', 'h4']) or link
+                    title = self.clean_text(title_elem.get_text())
+                else:
+                    title = self.clean_text(link.get_text())
+                
+                if title and len(title) > 20 and not self.is_junk_text(title):
+                    articles.append({
+                        'url': full_url,
+                        'title': title
+                    })
             
             # Убираем дубликаты
             unique_articles = []
@@ -371,7 +372,7 @@ class NewsBot:
             return []
     
     def parse_apnews_article(self, url, source_name):
-        """Парсинг отдельной статьи AP News с улучшенной фильтрацией"""
+        """Парсинг отдельной статьи AP News"""
         try:
             logger.info(f"🌐 Парсинг статьи AP News: {url}")
             
@@ -400,85 +401,73 @@ class NewsBot:
             if og_image and og_image.get('content'):
                 main_image = og_image['content']
             
-            if not main_image:
-                twitter_image = soup.find('meta', {'name': 'twitter:image'})
-                if twitter_image and twitter_image.get('content'):
-                    main_image = twitter_image['content']
-            
-            if not main_image:
-                img = soup.find('img', class_=re.compile(r'image|photo|featured|Figure-image|LeadImage'))
-                if img and img.get('src'):
-                    img_src = img['src']
-                    if img_src.startswith('//'):
-                        main_image = 'https:' + img_src
-                    elif img_src.startswith('/'):
-                        main_image = 'https://apnews.com' + img_src
-                    elif img_src.startswith('http'):
-                        main_image = img_src
-                    else:
-                        main_image = 'https://apnews.com/' + img_src
-            
-            # Текст статьи
+            # Текст статьи - ищем основной контент
             article_text = ""
-            text_container = None
             
-            selectors = [
-                'div.Article',
-                'div.Article-content',
-                'div.StoryBody',
-                'div.story-body',
-                'div.content',
-                'article',
-                'div.body-text',
-                'div.body-copy',
-                'div[class*="article-body"]',
-                'div[class*="story-body"]'
-            ]
+            # AP News использует специфическую структуру
+            # Ищем основной контейнер статьи
+            article_container = (
+                soup.find('div', class_='Article') or
+                soup.find('div', class_='StoryBody') or
+                soup.find('div', class_='article-body') or
+                soup.find('article')
+            )
             
-            for selector in selectors:
-                container = soup.select_one(selector)
-                if container:
-                    text_container = container
-                    break
-            
-            if text_container:
-                # Удаляем ненужные элементы
-                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure', 'nav', 'footer', 'iframe', 'div[class*="share"]', 'div[class*="social"]']):
+            if article_container:
+                # Удаляем все ненужные элементы
+                for unwanted in article_container.find_all(['script', 'style', 'button', 'aside', 'figure', 'nav', 'footer', 'iframe', 'div[class*="share"]', 'div[class*="social"]', 'div[class*="related"]', 'div[class*="recommended"]']):
                     unwanted.decompose()
                 
                 # Собираем параграфы
                 paragraphs = []
-                for p in text_container.find_all('p'):
+                for p in article_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
-                    if p_text and len(p_text) > 20 and not self.is_junk_text(p_text):
-                        paragraphs.append(p_text)
+                    if p_text and len(p_text) > 30 and not self.is_junk_text(p_text):
+                        # Проверяем, не содержит ли параграф признаки множественных новостей
+                        if not any(word in p_text.lower() for word in ['what to know', 'check your news', 'news i.q.', 'quiz:', 'you may have missed']):
+                            paragraphs.append(p_text)
                 
                 if paragraphs:
-                    article_text = '\n\n'.join(paragraphs)
+                    # Берем только первые параграфы, которые относятся к основной статье
+                    # Обычно в AP News основная статья занимает первые 5-7 параграфов
+                    main_paragraphs = paragraphs[:10]
+                    article_text = '\n\n'.join(main_paragraphs)
             
-            # Если не нашли структурированный текст или он слишком короткий
+            # Если не нашли структурированный текст
             if len(article_text) < 200:
-                # Удаляем скрипты и стили
-                for script in soup(['script', 'style', 'nav', 'footer', 'header']):
+                # Удаляем все скрипты и стили
+                for script in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
                     script.decompose()
                 
-                # Получаем весь текст
+                # Получаем текст
                 all_text = self.clean_text(soup.get_text())
                 
-                # Разбиваем на строки и фильтруем
-                lines = all_text.split('\n')
-                filtered_lines = []
-                
-                for line in lines:
-                    line = line.strip()
-                    if line and len(line) > 20 and not self.is_junk_text(line):
-                        filtered_lines.append(line)
-                
-                if filtered_lines:
-                    article_text = '\n\n'.join(filtered_lines[:15])  # Берем первые 15 строк
+                # Ищем начало статьи (обычно после заголовка)
+                if title in all_text:
+                    start = all_text.find(title) + len(title)
+                    # Берем следующий текст до первого признака другой статьи
+                    article_text = all_text[start:start + 1500].strip()
+                    
+                    # Обрезаем, если встречаются признаки других новостей
+                    cut_markers = ['what to know', 'check your news', 'news i.q.', 'quiz:', 'you may have missed', 'sign up for', 'morning briefing']
+                    for marker in cut_markers:
+                        marker_pos = article_text.lower().find(marker)
+                        if marker_pos > 100:  # Обрезаем только если маркер не в самом начале
+                            article_text = article_text[:marker_pos].strip()
+                            break
             
-            # Дополнительная очистка от служебной информации
+            # Дополнительная очистка
             article_text = self.clean_apnews_content(article_text)
+            
+            # Финальная проверка - убеждаемся, что текст не содержит множественных новостей
+            lines = article_text.split('\n')
+            filtered_lines = []
+            for line in lines:
+                line_lower = line.lower()
+                if not any(marker in line_lower for marker in ['what to know', 'check your news', 'news i.q.', 'quiz:', 'you may have missed', 'catch up on', 'sign up for']):
+                    filtered_lines.append(line)
+            
+            article_text = '\n'.join(filtered_lines)
             
             if len(article_text) < 200:
                 logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
@@ -806,46 +795,48 @@ class NewsBot:
         
         sentences = re.split(r'(?<=[.!?])\s+', paragraph)
         
-        result_sentences = []
+        result = []
         current_length = 0
         
         for sent in sentences:
             sent_length = len(sent)
-            if result_sentences:
-                sent_length += 1
+            if result:
+                sent_length += 1  # Добавляем пробел
             
             if current_length + sent_length <= max_length:
-                if result_sentences:
-                    current_length += 1
-                result_sentences.append(sent)
-                current_length += len(sent)
+                if result:
+                    result.append(' ' + sent)
+                    current_length += 1 + len(sent)
+                else:
+                    result.append(sent)
+                    current_length += len(sent)
             else:
-                if not result_sentences:
+                if not result:
+                    # Если ни одно предложение не влезло, обрезаем первое
                     words = sent.split()
                     for word in words:
                         if current_length + len(word) + 1 <= max_length:
-                            if result_sentences:
-                                result_sentences.append(' ' + word)
-                                current_length += len(word) + 1
+                            if result:
+                                result.append(' ' + word)
+                                current_length += 1 + len(word)
                             else:
-                                result_sentences.append(word)
+                                result.append(word)
                                 current_length += len(word)
                         else:
                             break
+                    if result:
+                        result.append('...')
                 break
         
-        if result_sentences:
-            return ' '.join(result_sentences)
-        else:
-            return paragraph[:max_length]
+        return ''.join(result)
     
     def build_caption_with_smart_truncation(self, title, paragraphs, max_length=TELEGRAM_MAX_CAPTION):
-        """Создание подписи с умной обрезкой"""
+        """Создание подписи с умной обрезкой до 1024 символов"""
         title_part = f"<b>{title}</b>"
         current_text = title_part
         current_length = len(title_part)
         
-        available_for_text = max_length - 5
+        available_for_text = max_length - 5  # Небольшой запас
         
         if current_length >= available_for_text:
             logger.warning("⚠️ Заголовок слишком длинный, обрезаю...")
@@ -868,25 +859,25 @@ class NewsBot:
                 logger.info(f"✅ Добавлен абзац {i+1} целиком ({len(para)} символов)")
             else:
                 if i == 0:
-                    max_para_length = available_for_text - current_length - len(separator)
-                    truncated_para = self.truncate_first_paragraph_by_sentences(para, max_para_length)
-                    
-                    if truncated_para and len(truncated_para) > 0:
-                        current_text += separator + truncated_para
-                        current_length += len(separator) + len(truncated_para)
-                        added_any_text = True
-                        logger.info(f"✂️ Первый абзац обрезан по предложениям ({len(truncated_para)} символов)")
+                    # Обрезаем первый абзац
+                    remaining = available_for_text - current_length - len(separator)
+                    if remaining > 20:  # Обрезаем только если есть смысл
+                        truncated_para = self.truncate_first_paragraph_by_sentences(para, remaining)
+                        if truncated_para:
+                            current_text += separator + truncated_para
+                            current_length += len(separator) + len(truncated_para)
+                            added_any_text = True
+                            logger.info(f"✂️ Первый абзац обрезан ({len(truncated_para)}/{len(para)} символов)")
                 else:
-                    logger.info(f"⏹️ Останов на абзаце {i+1}, дальше не влезает")
+                    logger.info(f"⏹️ Останов на абзаце {i+1}")
                 break
         
         if not added_any_text:
             logger.warning("⚠️ Не удалось добавить текст, публикую только заголовок")
         
-        final_caption = current_text
-        logger.info(f"📏 Итоговая длина: {len(final_caption)}/{max_length}")
+        logger.info(f"📏 Итоговая длина: {len(current_text)}/{max_length}")
         
-        return final_caption
+        return current_text
     
     async def create_single_post(self, news_item):
         """Создание одного поста"""
@@ -1011,7 +1002,7 @@ class NewsBot:
     async def start(self):
         """Запуск бота"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.14 - УЛУЧШЕННАЯ ФИЛЬТРАЦИЯ ТЕКСТА")
+        logger.info("🚀 NEWS BOT 8.15 - ПРАВИЛЬНОЕ ВЫДЕЛЕНИЕ СТАТЬИ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
