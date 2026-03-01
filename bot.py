@@ -28,7 +28,7 @@ from bs4 import BeautifulSoup
 
 # Настройка логирования
 logging.basicConfig(
-    format='%(asime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -929,4 +929,4 @@ class NewsBot:
         logger.info("=" * 70)
         logger.info("🚀 NEWS BOT 8.13 - ЕДИНЫЕ ПРАВИЛА ПУБЛИКАЦИИ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600
+        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч
