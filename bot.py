@@ -1,10 +1,10 @@
 """
-🤖 Telegram News Bot - Версия 8.8
-С AP NEWS ПО ВЫХОДНЫМ
+🤖 Telegram News Bot - Версия 8.9
+С РАБОЧИМИ RSS AP NEWS
 - UTC+7 часовой пояс
 - Без указания источника
 - Умная обрезка текста
-- AP News только в выходные
+- AP News только в выходные (рабочие RSS)
 """
 
 import os
@@ -57,17 +57,17 @@ WEEKDAY_FEEDS = [
     }
 ]
 
-# Источники для выходных
+# РАБОЧИЕ RSS для AP News
 WEEKEND_FEEDS = [
     {
-        'name': 'AP News',
-        'url': 'https://apnews.com/apf-topnews?utm_source=feedburner&utm_medium=feed&utm_campaign=Feed%3A+apnews%2FApTopNews+%28AP+Top+News%29',
+        'name': 'AP Top News',
+        'url': 'https://simplepie.ap.org/topnews/feed.xml',
         'enabled': True,
         'parser': 'apnews'
     },
     {
         'name': 'AP World News',
-        'url': 'https://apnews.com/world-news?utm_source=feedburner&utm_medium=feed&utm_campaign=Feed%3A+apnews%2FApWorldNews+%28AP+World+News%29',
+        'url': 'https://simplepie.ap.org/world/feed.xml',
         'enabled': True,
         'parser': 'apnews'
     }
@@ -76,7 +76,6 @@ WEEKEND_FEEDS = [
 # Определяем, какие источники использовать сегодня
 def get_today_feeds():
     """Возвращает список источников в зависимости от дня недели"""
-    local_hour = (datetime.now().hour + TIMEZONE_OFFSET) % 24
     local_date = datetime.now() + timedelta(hours=TIMEZONE_OFFSET)
     weekday = local_date.weekday()  # 0-6: понедельник-воскресенье
     
@@ -213,6 +212,8 @@ class NewsBot:
             
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
+                # Убираем " | AP News" из заголовка если есть
+                title = re.sub(r'\s*\|\s*AP\s*News.*$', '', title)
             
             # Изображение
             main_image = None
@@ -232,26 +233,28 @@ class NewsBot:
                     else:
                         main_image = img_src
             
-            # Текст
+            # Текст - AP News использует структуру article
             article_text = ""
-            # AP News часто использует article или div с классом Article
             text_container = soup.find('article') or soup.find('div', class_=re.compile(r'Article|story-body|content'))
             
             if text_container:
-                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside']):
+                for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'figure']):
                     unwanted.decompose()
                 
                 paragraphs = []
                 for p in text_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
-                    if p_text and len(p_text) > 15:
+                    if p_text and len(p_text) > 20:  # Чуть больше фильтр
                         paragraphs.append(p_text)
                 
                 if paragraphs:
                     article_text = '\n\n'.join(paragraphs)
             
             if len(article_text) < 200:
+                logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
                 return None
+            
+            logger.info(f"✅ Успешно спарсено: {len(article_text)} символов")
             
             return {
                 'title': title,
@@ -416,23 +419,25 @@ class NewsBot:
             
             logger.info(f"🔄 {source_name} (парсер: {parser_name})")
             
+            # Парсим RSS
             feed = feedparser.parse(feed_url)
             
             if feed.bozo:
-                logger.warning(f"⚠️ Ошибка RSS {source_name}, пробую запасной URL")
-                # Запасной URL для AP News
-                if 'apnews' in feed_url:
-                    alt_url = 'https://apnews.com/world-news'
-                    feed = feedparser.parse(alt_url)
-                    if feed.bozo:
-                        return []
+                logger.error(f"❌ Ошибка RSS {source_name}: {feed.bozo_exception}")
+                return []
+            
+            logger.info(f"📰 В RSS {len(feed.entries)} статей")
             
             news_items = []
-            for entry in feed.entries[:1]:
+            for entry in feed.entries[:1]:  # Берем только самую свежую
                 link = entry.get('link', '')
+                title = entry.get('title', 'Без заголовка')
                 
                 if link in self.sent_links:
+                    logger.info(f"⏭️ Уже опубликовано: {title[:50]}...")
                     continue
+                
+                logger.info(f"🔍 Новая статья: {title[:50]}...")
                 
                 loop = asyncio.get_event_loop()
                 article_data = await loop.run_in_executor(
@@ -450,13 +455,16 @@ class NewsBot:
                         'link': link,
                         'main_image': article_data.get('main_image')
                     })
+                    logger.info(f"✅ Статья успешно спарсена")
+                else:
+                    logger.warning(f"❌ Не удалось спарсить статью")
                 
                 await asyncio.sleep(random.randint(3, 8))
             
             return news_items
             
         except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
+            logger.error(f"❌ Ошибка в fetch_news_from_feed: {e}")
             return []
     
     async def fetch_all_news(self):
@@ -472,6 +480,7 @@ class NewsBot:
                 await asyncio.sleep(random.randint(3, 8))
         
         random.shuffle(all_news)
+        logger.info(f"📊 Всего новых статей: {len(all_news)}")
         return all_news
     
     async def download_image(self, url):
@@ -734,7 +743,7 @@ class NewsBot:
     
     async def start(self):
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.8 - С AP NEWS ПО ВЫХОДНЫМ")
+        logger.info("🚀 NEWS BOT 8.9 - РАБОЧИЕ RSS AP NEWS")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
