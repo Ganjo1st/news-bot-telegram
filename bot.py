@@ -1,9 +1,10 @@
 """
-🤖 Telegram News Bot - Версия 8.16
-С ОБНОВЛЕННЫМ ПАРСЕРОМ AP NEWS
+🤖 Telegram News Bot - Версия 8.17
+С ЗАЩИТОЙ ОТ ДУБЛИКАТОВ
 - UTC+7 часовой пояс
 - Без указания источника
 - Умная обрезка текста до 1024 символов
+- Проверка дубликатов до и после публикации
 """
 
 import os
@@ -110,6 +111,7 @@ class NewsBot:
         self.sent_links = self.load_json(SENT_LINKS_FILE)
         self.posts_log = self.load_json(POSTS_LOG_FILE)
         self.session = None
+        self.current_run_links = set()  # Ссылки, опубликованные в текущем запуске
         
         logger.info(f"📊 Загружено {len(self.sent_links)} ранее опубликованных ссылок")
     
@@ -131,6 +133,31 @@ class NewsBot:
                     json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения {filename}: {e}")
+    
+    def is_duplicate(self, link):
+        """Проверка на дубликат"""
+        # Проверяем в общем списке
+        if link in self.sent_links:
+            logger.info(f"⏭️ Ссылка уже в sent_links: {link}")
+            return True
+        
+        # Проверяем в текущем запуске
+        if link in self.current_run_links:
+            logger.info(f"⏭️ Ссылка уже опубликована в этом запуске: {link}")
+            return True
+        
+        # Проверяем в логе постов за последние 24 часа
+        if self.posts_log:
+            one_day_ago = datetime.now() - timedelta(days=1)
+            recent_posts = [p for p in self.posts_log 
+                           if datetime.fromisoformat(p['time']) > one_day_ago]
+            
+            for post in recent_posts:
+                if post.get('link') == link:
+                    logger.info(f"⏭️ Ссылка уже в логе постов за последние 24 часа")
+                    return True
+        
+        return False
     
     def can_post_now(self):
         """Проверка всех лимитов с учетом часового пояса UTC+7"""
@@ -161,6 +188,7 @@ class NewsBot:
         return True
     
     def log_post(self, link, title):
+        """Запись опубликованного поста"""
         self.posts_log.append({
             'link': link,
             'title': title[:50],
@@ -169,6 +197,13 @@ class NewsBot:
         if len(self.posts_log) > 100:
             self.posts_log = self.posts_log[-100:]
         self.save_json(POSTS_LOG_FILE, self.posts_log)
+        
+        # Добавляем в sent_links
+        self.sent_links.add(link)
+        self.save_json(SENT_LINKS_FILE, self.sent_links)
+        
+        # Добавляем в текущий запуск
+        self.current_run_links.add(link)
     
     async def get_session(self):
         if not self.session:
@@ -317,14 +352,14 @@ class NewsBot:
             if og_image and og_image.get('content'):
                 main_image = og_image['content']
             
-            # Текст статьи - НОВЫЙ УЛУЧШЕННЫЙ ПАРСИНГ
+            # Текст статьи
             article_text = ""
             
             # Удаляем все скрипты и стили
             for script in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
                 script.decompose()
             
-            # 1. Пытаемся найти основной контейнер статьи
+            # Пытаемся найти основной контейнер статьи
             containers = [
                 soup.find('div', class_='Article'),
                 soup.find('div', class_='RichTextStoryBody'),
@@ -341,7 +376,7 @@ class NewsBot:
                     main_container = container
                     break
             
-            # 2. Если нашли контейнер, собираем параграфы из него
+            # Если нашли контейнер, собираем параграфы из него
             if main_container:
                 # Удаляем ненужные элементы внутри контейнера
                 for unwanted in main_container.find_all(['button', 'aside', 'figure', 'div[class*="share"]', 'div[class*="social"]']):
@@ -357,7 +392,7 @@ class NewsBot:
                 if all_paragraphs:
                     article_text = '\n\n'.join(all_paragraphs)
             
-            # 3. Если не нашли контейнер или текст слишком короткий, используем fallback
+            # Если не нашли контейнер или текст слишком короткий, используем fallback
             if len(article_text) < 300:
                 # Получаем весь текст страницы
                 all_text = self.clean_text(soup.get_text())
@@ -394,7 +429,7 @@ class NewsBot:
                     if content_lines:
                         article_text = '\n\n'.join(content_lines)
             
-            # 4. Финальная очистка от служебной информации
+            # Финальная очистка от служебной информации
             if article_text:
                 # Удаляем строки с редакторами
                 article_text = re.sub(r'(?i)edited by.*?(?:\n|$)', '', article_text)
@@ -424,7 +459,7 @@ class NewsBot:
             return None
     
     def parse_infobrics(self, url, source_name):
-        """Парсер для InfoBrics (БЕЗ ИЗМЕНЕНИЙ)"""
+        """Парсер для InfoBrics"""
         try:
             logger.info(f"🌐 Парсинг {source_name}: {url}")
             
@@ -489,7 +524,7 @@ class NewsBot:
             return None
     
     def parse_globalresearch(self, url, source_name):
-        """Парсер для Global Research (БЕЗ ИЗМЕНЕНИЙ)"""
+        """Парсер для Global Research"""
         try:
             logger.info(f"🌐 Парсинг {source_name}: {url}")
             
@@ -577,8 +612,9 @@ class NewsBot:
                 article_url = article['url']
                 article_title = article['title']
                 
-                if article_url in self.sent_links:
-                    logger.info(f"⏭️ Уже опубликовано: {article_title[:50]}...")
+                # Проверка на дубликат
+                if self.is_duplicate(article_url):
+                    logger.info(f"⏭️ Дубликат: {article_title[:50]}...")
                     continue
                 
                 logger.info(f"🔍 Новая статья: {article_title[:50]}...")
@@ -608,7 +644,7 @@ class NewsBot:
             return []
     
     async def fetch_from_rss(self, feed_config):
-        """Получение статей из RSS (БЕЗ ИЗМЕНЕНИЙ)"""
+        """Получение статей из RSS"""
         try:
             feed_url = feed_config['url']
             source_name = feed_config['name']
@@ -631,8 +667,9 @@ class NewsBot:
                 link = entry.get('link', '')
                 title = entry.get('title', 'Без заголовка')
                 
-                if link in self.sent_links:
-                    logger.info(f"⏭️ Уже опубликовано: {title[:50]}...")
+                # Проверка на дубликат
+                if self.is_duplicate(link):
+                    logger.info(f"⏭️ Дубликат: {title[:50]}...")
                     continue
                 
                 logger.info(f"🔍 Новая статья: {title[:50]}...")
@@ -727,7 +764,7 @@ class NewsBot:
             return text
     
     def truncate_first_paragraph_by_sentences(self, paragraph, max_length):
-        """Обрезка первого абзаца по предложениям (БЕЗ ИЗМЕНЕНИЙ)"""
+        """Обрезка первого абзаца по предложениям"""
         if len(paragraph) <= max_length:
             return paragraph
         
@@ -768,7 +805,7 @@ class NewsBot:
         return ''.join(result)
     
     def build_caption_with_smart_truncation(self, title, paragraphs, max_length=TELEGRAM_MAX_CAPTION):
-        """Создание подписи с умной обрезкой (БЕЗ ИЗМЕНЕНИЙ)"""
+        """Создание подписи с умной обрезкой"""
         title_part = f"<b>{title}</b>"
         current_text = title_part
         current_length = len(title_part)
@@ -816,7 +853,7 @@ class NewsBot:
         return current_text
     
     async def create_single_post(self, news_item):
-        """Создание одного поста (БЕЗ ИЗМЕНЕНИЙ)"""
+        """Создание одного поста"""
         try:
             loop = asyncio.get_event_loop()
             
@@ -898,6 +935,9 @@ class NewsBot:
         logger.info("🔍 ПРОВЕРКА НОВОСТЕЙ")
         logger.info("=" * 60)
         
+        # Очищаем список ссылок текущего запуска
+        self.current_run_links.clear()
+        
         if not self.can_post_now():
             logger.info("⏳ Нельзя публиковать сейчас")
             return
@@ -915,6 +955,11 @@ class NewsBot:
                 logger.info("⏳ Лимит достигнут")
                 break
             
+            # Дополнительная проверка перед публикацией
+            if self.is_duplicate(item['link']):
+                logger.info(f"⏭️ Дубликат перед публикацией: {item['title'][:50]}...")
+                continue
+            
             logger.info(f"\n📝 Публикую: {item['title'][:50]}...")
             
             post_data = await self.create_single_post(item)
@@ -923,8 +968,6 @@ class NewsBot:
                 success = await self.publish_post(post_data)
                 
                 if success:
-                    self.sent_links.add(item['link'])
-                    self.save_json(SENT_LINKS_FILE, self.sent_links)
                     self.log_post(item['link'], item['title'])
                     published += 1
                     
@@ -938,7 +981,7 @@ class NewsBot:
     async def start(self):
         """Запуск бота"""
         logger.info("=" * 70)
-        logger.info("🚀 NEWS BOT 8.16 - ОБНОВЛЕННЫЙ ПАРСЕР AP NEWS")
+        logger.info("🚀 NEWS BOT 8.17 - ЗАЩИТА ОТ ДУБЛИКАТОВ")
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
