@@ -1,12 +1,12 @@
 """
-🤖 Telegram News Bot - Версия 8.13
-С ГАРАНТИРОВАННОЙ ЗАЩИТОЙ ОТ ДУБЛЕЙ
+🤖 Telegram News Bot - Версия 9.0
+ЕЖЕЧАСНАЯ ПУБЛИКАЦИЯ СО ВСЕХ ИСТОЧНИКОВ
 
 - UTC+7 часовой пояс
 - Без указания источника
 - Умная обрезка текста
-- AP News только в выходные
-- Никогда не публикует одну статью дважды
+- ВСЕ источники КАЖДЫЙ ДЕНЬ
+- Публикация КАЖДЫЙ ЧАС
 """
 
 import os
@@ -40,53 +40,42 @@ logger = logging.getLogger(__name__)
 # ============================================================
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
-CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '7200'))  # 2 часа
-MIN_POST_INTERVAL = 600  # Базовая пауза 10 минут
-MAX_POSTS_PER_DAY = 20  # Лимит постов в день
+CHECK_INTERVAL = 3600  # 1 час (3600 секунд)
+MIN_POST_INTERVAL = 600  # Базовая пауза 10 минут (на случай нескольких постов подряд)
+MAX_POSTS_PER_DAY = 24  # Лимит постов в день (максимум 24 при ежечасной публикации)
 TIMEZONE_OFFSET = 7  # Смещение для UTC+7
 
 # ============================================================
-# ИСТОЧНИКИ НОВОСТЕЙ
+# ВСЕ ИСТОЧНИКИ (КАЖДЫЙ ДЕНЬ)
 # ============================================================
-# Основные источники (будние дни)
-WEEKDAY_FEEDS = [
+ALL_FEEDS = [
+    # InfoBrics
     {
         'name': 'InfoBrics',
         'url': 'https://infobrics.org/rss/en',
         'enabled': True,
         'parser': 'infobrics',
-        'type': 'rss'
+        'type': 'rss',
+        'priority': 1  # Приоритет (чем меньше, тем важнее)
     },
+    # Global Research
     {
         'name': 'Global Research',
         'url': 'https://www.globalresearch.ca/feed',
         'enabled': True,
         'parser': 'globalresearch',
-        'type': 'rss'
-    }
-]
-
-# Источники для выходных (прямой парсинг HTML)
-WEEKEND_FEEDS = [
+        'type': 'rss',
+        'priority': 2
+    },
+    # AP News (прямой парсинг)
     {
         'name': 'AP News',
         'url': 'https://apnews.com/',
         'enabled': True,
-        'type': 'html_apnews'  # Специальный тип для AP News
+        'type': 'html_apnews',
+        'priority': 1
     }
 ]
-
-def get_today_feeds():
-    """Возвращает список источников в зависимости от дня недели"""
-    local_date = datetime.now() + timedelta(hours=TIMEZONE_OFFSET)
-    weekday = local_date.weekday()  # 0-6: понедельник-воскресенье
-    # Выходные: суббота (5) и воскресенье (6)
-    if weekday >= 5:
-        logger.info(f"📅 Сегодня выходной (день {weekday}), использую AP News (прямой парсинг)")
-        return WEEKEND_FEEDS
-    else:
-        logger.info(f"📅 Сегодня будний день (день {weekday}), использую основные источники")
-        return WEEKDAY_FEEDS
 
 # ============================================================
 # ФАЙЛЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ
@@ -110,16 +99,15 @@ class NewsBot:
         self.bot = Bot(token=TELEGRAM_TOKEN)
         self.translator = GoogleTranslator(source='en', target='ru')
         self.scheduler = AsyncIOScheduler()
-        self.sent_links = self.load_sent_links()  # Используем специальный метод
+        self.sent_links = self.load_sent_links()
         self.posts_log = self.load_json(POSTS_LOG_FILE)
         self.session = None
+        self.last_post_time = None
         
-        # Важно! Показываем, сколько ссылок уже сохранено
+        # Статистика
         logger.info(f"📊 Загружено {len(self.sent_links)} ранее опубликованных ссылок")
-        if len(self.sent_links) > 0:
-            logger.info(f"📋 Примеры первых 3 ссылок:")
-            for i, link in enumerate(list(self.sent_links)[:3]):
-                logger.info(f"   {i+1}. {link}")
+        logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе постов")
+        logger.info(f"⏱ Режим: ежечасная публикация (каждые {CHECK_INTERVAL//60} минут)")
 
     # ========== РАБОТА С JSON ==========
     def load_json(self, filename):
@@ -132,34 +120,28 @@ class NewsBot:
             return []
 
     def load_sent_links(self):
-        """
-        Специальный метод для загрузки опубликованных ссылок.
-        Всегда возвращает set(), даже если файл пустой или поврежден.
-        """
+        """Загрузка опубликованных ссылок"""
         try:
             if os.path.exists(SENT_LINKS_FILE):
                 with open(SENT_LINKS_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     if isinstance(data, list):
-                        # Преобразуем список в set для быстрого поиска
                         return set(data)
                     else:
                         logger.warning(f"⚠️ Неверный формат {SENT_LINKS_FILE}, создаю новый")
                         return set()
             else:
-                logger.info(f"📁 Файл {SENT_LINKS_FILE} не найден, будет создан при первой публикации")
                 return set()
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки {SENT_LINKS_FILE}: {e}")
             return set()
 
     def save_sent_links(self):
-        """Сохраняет множество опубликованных ссылок в файл"""
+        """Сохраняет множество опубликованных ссылок"""
         try:
-            # Преобразуем set в list для сохранения в JSON
             with open(SENT_LINKS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(list(self.sent_links), f, ensure_ascii=False, indent=2)
-            logger.debug(f"💾 Сохранено {len(self.sent_links)} ссылок в {SENT_LINKS_FILE}")
+            logger.debug(f"💾 Сохранено {len(self.sent_links)} ссылок")
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения {SENT_LINKS_FILE}: {e}")
 
@@ -180,18 +162,14 @@ class NewsBot:
             logger.info(f"🌙 Ночное время по местному ({local_hour}:00), пропускаю")
             return False
 
-        if self.posts_log:
-            # Используем datetime.fromisoformat для парсинга даты
-            last_post_time_str = self.posts_log[-1]['time']
-            # Убираем микросекунды если есть
-            if '.' in last_post_time_str:
-                last_post_time_str = last_post_time_str.split('.')[0]
-            last_time = datetime.fromisoformat(last_post_time_str)
-            time_diff = datetime.now() - last_time
+        # Проверка интервала между постами
+        if self.last_post_time:
+            time_diff = datetime.now() - self.last_post_time
             if time_diff < timedelta(seconds=MIN_POST_INTERVAL):
                 logger.info(f"⏳ С последнего поста прошло {time_diff.seconds}с, нужно ждать {MIN_POST_INTERVAL}с")
                 return False
 
+        # Проверка дневного лимита
         today = datetime.now().date()
         today_posts = 0
         for post in self.posts_log:
@@ -207,7 +185,7 @@ class NewsBot:
             logger.info(f"⏳ Достигнут дневной лимит {MAX_POSTS_PER_DAY} постов")
             return False
 
-        logger.debug(f"✅ Можно публиковать (сегодня {today_posts}/{MAX_POSTS_PER_DAY})")
+        logger.info(f"✅ Можно публиковать (сегодня {today_posts}/{MAX_POSTS_PER_DAY})")
         return True
 
     def log_post(self, link, title):
@@ -221,6 +199,7 @@ class NewsBot:
         if len(self.posts_log) > 100:
             self.posts_log = self.posts_log[-100:]
         self.save_json(POSTS_LOG_FILE, self.posts_log)
+        self.last_post_time = datetime.now()
 
     async def get_session(self):
         if not self.session:
@@ -245,15 +224,13 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
 
-    # ========== ПАРСЕР AP NEWS (ГЛАВНАЯ) ==========
+    # ========== ПАРСЕР AP NEWS ==========
     def get_apnews_articles(self):
-        """
-        Парсит главную страницу AP News и возвращает список свежих статей
-        """
+        """Парсит главную страницу AP News и возвращает список свежих статей"""
         try:
             logger.info("🌐 Парсинг главной страницы AP News")
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             response = requests.get('https://apnews.com/', headers=headers, timeout=15)
             if response.status_code != 200:
@@ -263,11 +240,10 @@ class NewsBot:
             soup = BeautifulSoup(response.text, 'html.parser')
             articles = []
 
-            # Ищем все ссылки, которые ведут на статьи
+            # Ищем все ссылки на статьи
             for link in soup.find_all('a', href=True):
                 href = link['href']
-
-                # Нас интересуют ссылки на статьи
+                
                 full_url = None
                 if '/article/' in href:
                     if href.startswith('https://apnews.com/'):
@@ -281,14 +257,12 @@ class NewsBot:
                 # Получаем заголовок
                 title = link.get_text(strip=True)
                 if not title or len(title) < 15:
-                    # Если в ссылке нет текста, ищем в родительских элементах
                     parent = link.find_parent(['h2', 'h3'])
                     if parent:
                         title = parent.get_text(strip=True)
                     else:
                         continue
 
-                # Очищаем заголовок от мусора
                 title = re.sub(r'\s+', ' ', title).strip()
                 if len(title) < 15:
                     continue
@@ -298,7 +272,7 @@ class NewsBot:
                     'title': title
                 })
 
-            # Убираем дубликаты по URL
+            # Убираем дубликаты
             unique_articles = []
             seen_urls = set()
             for article in articles:
@@ -307,20 +281,17 @@ class NewsBot:
                     unique_articles.append(article)
 
             logger.info(f"✅ Найдено {len(unique_articles)} статей на главной AP News")
-            return unique_articles[:5]  # Возвращаем первые 5 статей
+            return unique_articles[:5]
 
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга AP News: {e}")
             return []
 
-    # ========== ПАРСЕР СТАТЬИ AP NEWS ==========
     def parse_apnews_article(self, url, source_name):
         """Парсинг отдельной статьи AP News"""
         try:
             logger.info(f"🌐 Парсинг статьи AP News: {url}")
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
+            headers = {'User-Agent': 'Mozilla/5.0'}
             response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка загрузки: HTTP {response.status_code}")
@@ -328,22 +299,19 @@ class NewsBot:
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            # --- ЗАГОЛОВОК ---
+            # Заголовок
             title = "Без заголовка"
             title_elem = soup.find('h1')
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
-                # Убираем " | AP News" из заголовка
                 title = re.sub(r'\s*\|.*AP\s*News.*$', '', title, flags=re.IGNORECASE)
 
-            # --- ИЗОБРАЖЕНИЕ ---
+            # Изображение
             main_image = None
-            # Сначала ищем в meta og:image
             meta_img = soup.find('meta', property='og:image')
             if meta_img and meta_img.get('content'):
                 main_image = meta_img['content']
             else:
-                # Ищем первое большое изображение в статье
                 img_elem = soup.find('img', src=re.compile(r'\.(jpg|jpeg|png|webp)', re.I))
                 if img_elem and img_elem.get('src'):
                     img_src = img_elem['src']
@@ -352,10 +320,8 @@ class NewsBot:
                     elif img_src.startswith('http'):
                         main_image = img_src
 
-            # --- ТЕКСТ СТАТЬИ ---
+            # Текст статьи
             article_text = ""
-
-            # Пробуем найти основной контейнер с текстом
             possible_containers = [
                 soup.find('div', class_=re.compile(r'Article', re.I)),
                 soup.find('div', class_=re.compile(r'story-body', re.I)),
@@ -371,11 +337,9 @@ class NewsBot:
                     break
 
             if text_container:
-                # Удаляем ненужные элементы
                 for unwanted in text_container.find_all(['script', 'style', 'button', 'aside', 'nav']):
                     unwanted.decompose()
 
-                # Собираем все параграфы
                 paragraphs = []
                 for p in text_container.find_all('p'):
                     p_text = self.clean_text(p.get_text())
@@ -385,10 +349,8 @@ class NewsBot:
                 if paragraphs:
                     article_text = '\n\n'.join(paragraphs)
 
-            # Если не нашли параграфы, пробуем взять весь текст
             if len(article_text) < 200:
                 all_text = self.clean_text(soup.get_text())
-                # Ищем текст после заголовка
                 if title in all_text:
                     start = all_text.find(title) + len(title)
                     article_text = all_text[start:start + 2000].strip()
@@ -526,13 +488,12 @@ class NewsBot:
             logger.error(f"❌ Ошибка парсинга Global Research: {e}")
             return None
 
-    # ========== ЗАГРУЗКА НОВОСТЕЙ ИЗ РАЗНЫХ ИСТОЧНИКОВ ==========
+    # ========== ЗАГРУЗКА НОВОСТЕЙ ==========
     async def fetch_from_apnews(self):
-        """Получение свежих статей с AP News (без RSS)"""
+        """Получение свежих статей с AP News"""
         try:
             logger.info("🔄 AP News (прямой парсинг)")
 
-            # Получаем список статей с главной
             articles = await asyncio.get_event_loop().run_in_executor(
                 None, self.get_apnews_articles
             )
@@ -542,13 +503,12 @@ class NewsBot:
                 return []
 
             news_items = []
-            for article in articles[:1]:  # Берем только первую статью
+            for article in articles[:2]:  # Берем первые 2 статьи
                 url = article['url']
                 title = article['title']
 
-                # КРИТИЧЕСКИ ВАЖНО: проверяем, не публиковали ли уже
                 if url in self.sent_links:
-                    logger.info(f"⏭️ УЖЕ БЫЛО (в sent_links): {title[:50]}... - {url}")
+                    logger.info(f"⏭️ УЖЕ БЫЛО: {title[:50]}...")
                     continue
 
                 logger.info(f"🔍 НОВАЯ статья: {title[:50]}...")
@@ -558,16 +518,15 @@ class NewsBot:
                 )
 
                 if article_data:
-                    # Дополнительная проверка по заголовку (на всякий случай)
-                    title_to_add = article_data['title']
                     news_items.append({
                         'source': 'AP News',
-                        'title': title_to_add,
+                        'title': article_data['title'],
                         'content': article_data['content'],
                         'link': url,
-                        'main_image': article_data.get('main_image')
+                        'main_image': article_data.get('main_image'),
+                        'priority': 1
                     })
-                    logger.info(f"✅ Статья успешно спарсена и добавлена в очередь")
+                    logger.info(f"✅ Статья добавлена в очередь")
                 else:
                     logger.warning(f"❌ Не удалось спарсить статью")
 
@@ -584,6 +543,7 @@ class NewsBot:
             feed_url = feed_config['url']
             source_name = feed_config['name']
             parser_name = feed_config.get('parser', 'infobrics')
+            priority = feed_config.get('priority', 5)
             logger.info(f"🔄 {source_name} (RSS)")
 
             # Выбираем функцию парсера
@@ -602,13 +562,12 @@ class NewsBot:
             logger.info(f"📰 В RSS {len(feed.entries)} статей")
 
             news_items = []
-            for entry in feed.entries[:1]:  # Берем только самую свежую
+            for entry in feed.entries[:2]:  # Берем первые 2 статьи из RSS
                 link = entry.get('link', '')
                 title = entry.get('title', 'Без заголовка')
 
-                # КРИТИЧЕСКИ ВАЖНО: проверяем, не публиковали ли уже
                 if link in self.sent_links:
-                    logger.info(f"⏭️ УЖЕ БЫЛО (в sent_links): {title[:50]}... - {link}")
+                    logger.info(f"⏭️ УЖЕ БЫЛО: {title[:50]}...")
                     continue
 
                 logger.info(f"🔍 НОВАЯ статья: {title[:50]}...")
@@ -624,9 +583,10 @@ class NewsBot:
                         'title': article_data['title'],
                         'content': article_data['content'],
                         'link': link,
-                        'main_image': article_data.get('main_image')
+                        'main_image': article_data.get('main_image'),
+                        'priority': priority
                     })
-                    logger.info(f"✅ Статья успешно спарсена и добавлена в очередь")
+                    logger.info(f"✅ Статья добавлена в очередь")
                 else:
                     logger.warning(f"❌ Не удалось спарсить статью")
 
@@ -639,21 +599,25 @@ class NewsBot:
             return []
 
     async def fetch_all_news(self):
+        """Сбор новостей из ВСЕХ источников"""
         all_news = []
-        today_feeds = get_today_feeds()
 
-        for feed in today_feeds:
-            if feed['enabled']:
-                if feed.get('type') == 'html_apnews':
-                    news = await self.fetch_from_apnews()
-                else:
-                    news = await self.fetch_from_rss(feed)
-                all_news.extend(news)
-                await asyncio.sleep(random.randint(3, 8))
+        for feed in ALL_FEEDS:
+            if not feed['enabled']:
+                continue
 
-        # Перемешиваем новости из разных источников
-        random.shuffle(all_news)
-        logger.info(f"📊 Всего новых статей (после проверки дублей): {len(all_news)}")
+            if feed.get('type') == 'html_apnews':
+                news = await self.fetch_from_apnews()
+            else:
+                news = await self.fetch_from_rss(feed)
+
+            all_news.extend(news)
+            await asyncio.sleep(random.randint(5, 10))  # Пауза между источниками
+
+        # Сортируем по приоритету (сначала важные)
+        all_news.sort(key=lambda x: x.get('priority', 5))
+
+        logger.info(f"📊 ВСЕГО НОВЫХ СТАТЕЙ: {len(all_news)}")
         return all_news
 
     async def download_image(self, url):
@@ -694,7 +658,7 @@ class NewsBot:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
 
-    # ========== УМНАЯ ОБРЕЗКА ТЕКСТА ==========
+    # ========== УМНАЯ ОБРЕЗКА ==========
     def truncate_first_paragraph_by_sentences(self, paragraph, max_length):
         if len(paragraph) <= max_length:
             return paragraph
@@ -706,7 +670,7 @@ class NewsBot:
         for sent in sentences:
             sent_length = len(sent)
             if result_sentences:
-                sent_length += 1  # пробел
+                sent_length += 1
 
             if current_length + sent_length <= max_length:
                 if result_sentences:
@@ -715,7 +679,6 @@ class NewsBot:
                 current_length += len(sent)
             else:
                 if not result_sentences:
-                    # Если не помещается ни одного предложения, обрезаем по словам
                     words = sent.split()
                     for word in words:
                         if current_length + len(word) + 1 <= max_length:
@@ -867,86 +830,95 @@ class NewsBot:
                 return False
 
     async def check_and_publish(self):
-        logger.info("="*60)
-        logger.info("🔍 ПРОВЕРКА НОВОСТЕЙ")
-        logger.info("="*60)
+        """Основной цикл - запускается каждый час"""
+        logger.info("="*70)
+        logger.info(f"🕐 ЕЖЕЧАСНАЯ ПРОВЕРКА: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("="*70)
 
         if not self.can_post_now():
-            logger.info("⏳ Нельзя публиковать сейчас")
+            logger.info("⏳ Нельзя публиковать сейчас (ночь или лимиты)")
             return
 
+        # Собираем новости из ВСЕХ источников
         news_items = await self.fetch_all_news()
+        
         if not news_items:
-            logger.info("📭 Новых статей нет")
+            logger.info("📭 НОВЫХ СТАТЕЙ НЕТ НИ В ОДНОМ ИСТОЧНИКЕ")
             return
 
-        published = 0
-        for item in news_items:
-            if not self.can_post_now():
-                logger.info("⏳ Лимит достигнут")
-                break
+        # Публикуем ОДНУ статью (самую свежую/приоритетную)
+        item = news_items[0]
+        logger.info(f"\n📝 ПУБЛИКАЦИЯ: {item['title'][:70]}...")
+        logger.info(f"   Источник: {item['source']}")
+        logger.info(f"   Ссылка: {item['link']}")
 
-            logger.info(f"\n📝 Публикую: {item['title'][:50]}...")
-            post_data = await self.create_single_post(item)
+        post_data = await self.create_single_post(item)
 
-            if post_data:
-                success = await self.publish_post(post_data)
-                if success:
-                    # Добавляем ссылку в множество опубликованных
-                    self.sent_links.add(item['link'])
-                    # И СРАЗУ СОХРАНЯЕМ!
-                    self.save_sent_links()
-                    
-                    self.log_post(item['link'], item['title'])
-                    published += 1
-                    logger.info(f"✅ Ссылка сохранена в sent_links.json (всего {len(self.sent_links)})")
+        if post_data:
+            success = await self.publish_post(post_data)
+            if success:
+                self.sent_links.add(item['link'])
+                self.save_sent_links()
+                self.log_post(item['link'], item['title'])
+                logger.info(f"✅ Статья опубликована. Всего в базе: {len(self.sent_links)} ссылок")
+                
+                # Если остались еще статьи, они будут опубликованы в следующие часы
+                if len(news_items) > 1:
+                    logger.info(f"📦 В очереди еще {len(news_items)-1} статей (будут опубликованы позже)")
+            else:
+                logger.error(f"❌ Не удалось опубликовать статью")
+        else:
+            logger.error(f"❌ Не удалось создать пост")
 
-            if published < len(news_items):
-                pause = MIN_POST_INTERVAL + random.randint(-120, 300)
-                logger.info(f"⏱ Пауза {pause//60} минут...")
-                await asyncio.sleep(pause)
-
-        logger.info(f"\n📊 Опубликовано: {published}")
+        logger.info(f"\n⏰ Следующая проверка через 1 час")
 
     async def start(self):
-        logger.info("="*70)
-        logger.info("🚀 NEWS BOT 8.13 - ЗАЩИТА ОТ ДУБЛЕЙ")
+        """Запуск бота"""
+        logger.info("="*80)
+        logger.info("🚀 NEWS BOT 9.0 - ЕЖЕЧАСНАЯ ПУБЛИКАЦИЯ")
+        logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"⏱ Проверка: каждые {CHECK_INTERVAL//3600}ч")
-        logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY}/день")
+        logger.info(f"⏱ Режим: публикация КАЖДЫЙ ЧАС")
+        logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
         logger.info(f"📏 Лимит подписи: {TELEGRAM_MAX_CAPTION}")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
         logger.info(f"🔒 Защита от дублей: {len(self.sent_links)} ссылок в базе")
+        logger.info("="*80)
 
-        # Показываем, какие источники будут использоваться сегодня
-        today_feeds = get_today_feeds()
-        logger.info("📡 Источники сегодня:")
-        for feed in today_feeds:
+        # Показываем все источники
+        logger.info("📡 ИСТОЧНИКИ (КАЖДЫЙ ДЕНЬ):")
+        for feed in ALL_FEEDS:
             if feed['enabled']:
-                logger.info(f"   - {feed['name']}")
-        logger.info("="*70)
+                logger.info(f"   - {feed['name']} (приоритет: {feed.get('priority', 5)})")
+        logger.info("="*80)
 
         try:
             me = await self.bot.get_me()
-            logger.info(f"✅ Бот @{me.username}")
+            logger.info(f"✅ Бот @{me.username} авторизован")
         except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
+            logger.error(f"❌ Ошибка подключения бота: {e}")
             return
 
+        # Первая проверка сразу при запуске
+        logger.info("🚀 ЗАПУСК ПЕРВОЙ ПРОВЕРКИ")
         await self.check_and_publish()
 
+        # Планировщик для ежечасных проверок
         self.scheduler.add_job(
             self.check_and_publish,
             'interval',
-            seconds=CHECK_INTERVAL
+            seconds=CHECK_INTERVAL,
+            id='hourly_checker',
+            next_run_time=datetime.now() + timedelta(seconds=CHECK_INTERVAL)
         )
         self.scheduler.start()
-        logger.info(f"✅ Планировщик запущен")
+        logger.info(f"✅ Планировщик запущен. Следующая проверка через 1 час")
 
         try:
             while True:
                 await asyncio.sleep(60)
         except KeyboardInterrupt:
+            logger.info("🛑 Бот остановлен")
             if self.session:
                 await self.session.close()
 
