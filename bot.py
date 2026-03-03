@@ -1,10 +1,7 @@
 """
-🤖 Telegram News Bot - Версия 9.2
-ИСПРАВЛЕННЫЙ ПАРСИНГ GLOBAL RESEARCH
-
-- Хаотичная публикация
-- Удаление мета-данных
-- Правильный парсинг всех источников
+🤖 Telegram News Bot - Версия 9.3
+ИСПРАВЛЕННАЯ ОШИБКА С ИНТЕРВАЛАМИ
++ УЛУЧШЕННЫЙ ПАРСИНГ AP NEWS
 """
 
 import os
@@ -39,12 +36,13 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
 
-# ХАОТИЧНЫЙ РЕЖИМ
-MIN_POST_INTERVAL = 35 * 60  # 35 минут в секундах
-MAX_POST_INTERVAL = 2 * 60 * 60  # 2 часа в секундах
-CHECK_INTERVAL = 30 * 60  # 30 минут
-MAX_POSTS_PER_DAY = 24
-TIMEZONE_OFFSET = 7
+# ХАОТИЧНЫЙ РЕЖИМ (в секундах)
+MIN_POST_INTERVAL = 35 * 60      # 35 минут (2100 секунд) - минимальный интервал
+MAX_POST_INTERVAL = 2 * 60 * 60  # 2 часа (7200 секунд) - максимальный интервал
+
+CHECK_INTERVAL = 30 * 60  # 30 минут (1800 секунд) - проверка новых статей
+MAX_POSTS_PER_DAY = 24    # максимум постов в день
+TIMEZONE_OFFSET = 7       # UTC+7
 
 # ============================================================
 # ВСЕ ИСТОЧНИКИ
@@ -104,6 +102,7 @@ class NewsBot:
         
         logger.info(f"📊 Загружено {len(self.sent_links)} ранее опубликованных ссылок")
         logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе постов")
+        logger.info(f"⏱ Интервалы: MIN={MIN_POST_INTERVAL//60} мин, MAX={MAX_POST_INTERVAL//60} мин")
 
     # ========== РАБОТА С JSON ==========
     def load_json(self, filename):
@@ -217,9 +216,25 @@ class NewsBot:
         return True
 
     def get_next_post_delay(self):
-        delay = random.randint(MIN_POST_INTERVAL, MAX_POST_INTERVAL)
+        """
+        Возвращает случайную задержку в секундах между MIN_POST_INTERVAL и MAX_POST_INTERVAL
+        """
+        # Убеждаемся, что MIN меньше MAX
+        min_val = min(MIN_POST_INTERVAL, MAX_POST_INTERVAL)
+        max_val = max(MIN_POST_INTERVAL, MAX_POST_INTERVAL)
+        
+        # Генерируем случайное число в диапазоне
+        delay = random.randint(min_val, max_val)
+        
+        # Добавляем случайную вариацию ±15%
         variation = random.uniform(0.85, 1.15)
-        return int(delay * variation)
+        delay = int(delay * variation)
+        
+        # Убеждаемся, что не вышли за пределы
+        delay = max(min_val, min(delay, max_val))
+        
+        logger.info(f"🎲 Случайная задержка: {delay//60} минут {delay%60} секунд")
+        return delay
 
     def log_post(self, link, title):
         self.posts_log.append({
@@ -256,9 +271,8 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
 
-    # ========== ИСПРАВЛЕННЫЙ ПАРСЕР GLOBAL RESEARCH ==========
+    # ========== ПАРСЕР GLOBAL RESEARCH ==========
     def parse_globalresearch(self, url, source_name):
-        """ИСПРАВЛЕННЫЙ парсер для Global Research"""
         try:
             logger.info(f"🌐 Парсинг Global Research: {url}")
             headers = {
@@ -274,7 +288,6 @@ class NewsBot:
             # 1. ЗАГОЛОВОК
             title = "Без заголовка"
             
-            # Пробуем разные варианты заголовка
             title_elem = (
                 soup.find('h1', class_=re.compile(r'title|headline', re.I)) or
                 soup.find('h1') or
@@ -283,17 +296,14 @@ class NewsBot:
             
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
-                # Убираем название сайта из заголовка
                 title = re.sub(r'\s*[|\-–]\s*Global\s+Research.*$', '', title, flags=re.IGNORECASE)
                 title = re.sub(r'\s*[|\-–]\s*Centre\s+for\s+Research.*$', '', title, flags=re.IGNORECASE)
 
             # 2. ИЗОБРАЖЕНИЕ
             main_image = None
             
-            # Сначала ищем featured image
             img_elem = soup.find('img', class_=re.compile(r'featured|wp-post-image|attachment-', re.I))
             if not img_elem:
-                # Ищем первое изображение в статье
                 article_div = soup.find(['article', 'div'], class_=re.compile(r'entry|post|content', re.I))
                 if article_div:
                     img_elem = article_div.find('img')
@@ -310,10 +320,8 @@ class NewsBot:
             # 3. ТЕКСТ СТАТЬИ
             article_text = ""
             
-            # Находим контейнер со статьей
             article_container = None
             
-            # Пробуем разные селекторы
             possible_selectors = [
                 ('div', {'class_': re.compile(r'entry-content', re.I)}),
                 ('div', {'class_': re.compile(r'post-content', re.I)}),
@@ -331,29 +339,23 @@ class NewsBot:
                     break
             
             if not article_container:
-                # Если не нашли специфичный контейнер, берем body
                 article_container = soup.body
             
             if article_container:
-                # Удаляем ненужные элементы
                 for unwanted in article_container.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
                     unwanted.decompose()
                 
-                # Удаляем элементы с классами, содержащими рекламу или навигацию
                 for elem in article_container.find_all(class_=re.compile(r'sidebar|widget|ad|comment|share|social|related', re.I)):
                     elem.decompose()
                 
-                # Собираем параграфы
                 paragraphs = []
                 
                 for p in article_container.find_all('p'):
                     p_text = p.get_text(strip=True)
                     
-                    # Фильтруем параграфы
                     if p_text and len(p_text) > 20:
                         lower_text = p_text.lower()
                         
-                        # Пропускаем явно служебные параграфы
                         skip_phrases = [
                             'click here', 'read more', 'subscribe', 'newsletter',
                             'follow us', 'share this', 'comments', 'advertisement',
@@ -374,19 +376,16 @@ class NewsBot:
                     article_text = '\n\n'.join(paragraphs)
                     logger.info(f"✅ Найдено {len(paragraphs)} параграфов")
                 else:
-                    # Если не нашли параграфы, пробуем взять весь текст контейнера
                     logger.warning("⚠️ Параграфы не найдены, пробую взять весь текст")
                     article_text = article_container.get_text(separator='\n\n', strip=True)
                     
-                    # Чистим полученный текст
                     lines = [line.strip() for line in article_text.split('\n') if len(line.strip()) > 50]
-                    article_text = '\n\n'.join(lines[:15])  # Берем первые 15 непустых строк
+                    article_text = '\n\n'.join(lines[:15])
 
             if len(article_text) < 200:
                 logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
                 return None
 
-            # Удаляем мета-данные
             article_text = self.remove_metadata(article_text)
 
             logger.info(f"✅ Успешно спарсено: {len(article_text)} символов")
@@ -413,13 +412,11 @@ class NewsBot:
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            # Заголовок
             title = "Без заголовка"
             title_elem = soup.find('div', class_=re.compile(r'title.*big')) or soup.find('h1')
             if title_elem:
                 title = self.clean_text(title_elem.get_text())
 
-            # Изображение
             main_image = None
             img_elem = soup.find('img', class_=re.compile(r'article.*image'))
             if img_elem and img_elem.get('src'):
@@ -433,7 +430,6 @@ class NewsBot:
                 else:
                     main_image = img_src
 
-            # Текст
             article_text = ""
             text_container = soup.find('div', class_=re.compile(r'article__text')) or soup.find('div', class_=re.compile(r'article'))
             if text_container:
@@ -459,47 +455,55 @@ class NewsBot:
             logger.error(f"❌ Ошибка парсинга InfoBrics: {e}")
             return None
 
-    # ========== ПАРСЕР AP NEWS ==========
+    # ========== УЛУЧШЕННЫЙ ПАРСЕР AP NEWS ==========
     def get_apnews_articles(self):
+        """УЛУЧШЕННЫЙ парсинг главной страницы AP News"""
         try:
             logger.info("🌐 Парсинг главной страницы AP News")
-            headers = {'User-Agent': 'Mozilla/5.0'}
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
             response = requests.get('https://apnews.com/', headers=headers, timeout=15)
             if response.status_code != 200:
+                logger.error(f"❌ Ошибка загрузки: {response.status_code}")
                 return []
 
             soup = BeautifulSoup(response.text, 'html.parser')
             articles = []
 
-            for card in soup.find_all(['div', 'article'], class_=re.compile(r'Card|Article|FeedCard', re.I)):
-                link = card.find('a', href=True)
-                if not link:
-                    continue
-                    
+            # Ищем все ссылки на статьи
+            for link in soup.find_all('a', href=True):
                 href = link['href']
                 
-                full_url = None
-                if href.startswith('https://apnews.com/'):
-                    full_url = href
-                elif href.startswith('/'):
-                    full_url = 'https://apnews.com' + href
-                elif 'apnews.com' in href:
-                    full_url = href
-                else:
-                    continue
-
-                title_elem = card.find(['h1', 'h2', 'h3', 'h4'])
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                else:
+                # Проверяем, что это ссылка на статью
+                if '/article/' in href:
+                    full_url = None
+                    if href.startswith('https://apnews.com/'):
+                        full_url = href
+                    elif href.startswith('/'):
+                        full_url = 'https://apnews.com' + href
+                    elif 'apnews.com' in href:
+                        full_url = href
+                    else:
+                        continue
+                    
+                    # Получаем заголовок
                     title = link.get_text(strip=True)
+                    
+                    # Если в ссылке нет текста, ищем в родителе
+                    if not title or len(title) < 15:
+                        parent = link.find_parent(['h2', 'h3', 'h4', 'div'])
+                        if parent:
+                            title = parent.get_text(strip=True)
+                    
+                    if title and len(title) > 15:
+                        title = re.sub(r'\s+', ' ', title).strip()
+                        articles.append({
+                            'url': full_url,
+                            'title': title
+                        })
 
-                if not title or len(title) < 15:
-                    continue
-
-                title = re.sub(r'\s+', ' ', title).strip()
-                articles.append({'url': full_url, 'title': title})
-
+            # Убираем дубликаты
             unique_articles = []
             seen_urls = set()
             for article in articles:
@@ -515,6 +519,7 @@ class NewsBot:
             return []
 
     def parse_apnews_article(self, url, source_name):
+        """УЛУЧШЕННЫЙ парсинг статьи AP News"""
         try:
             logger.info(f"🌐 Парсинг статьи AP News: {url}")
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -524,7 +529,7 @@ class NewsBot:
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            # Заголовок
+            # 1. ЗАГОЛОВОК
             title = "Без заголовка"
             meta_title = soup.find('meta', property='og:title')
             if meta_title and meta_title.get('content'):
@@ -536,14 +541,16 @@ class NewsBot:
             
             title = re.sub(r'\s*\|.*AP\s*News.*$', '', title, flags=re.IGNORECASE)
 
-            # Изображение
+            # 2. ИЗОБРАЖЕНИЕ
             main_image = None
             meta_img = soup.find('meta', property='og:image')
             if meta_img and meta_img.get('content'):
                 main_image = meta_img['content']
 
-            # Текст
+            # 3. ТЕКСТ СТАТЬИ
             article_text = ""
+            
+            # Находим основной контейнер
             main_container = None
             
             possible_selectors = [
@@ -564,23 +571,28 @@ class NewsBot:
                 main_container = soup.body
             
             if main_container:
+                # Удаляем ненужные элементы
                 for unwanted in main_container.find_all(['aside', 'nav', 'header', 'footer', 'script', 'style']):
                     unwanted.decompose()
                 
                 for elem in main_container.find_all(class_=re.compile(r'sidebar|newsletter|related|ad|promo', re.I)):
                     elem.decompose()
                 
+                # Собираем параграфы
                 paragraphs = []
                 for p in main_container.find_all('p'):
                     p_text = p.get_text(strip=True)
                     if p_text and len(p_text) > 20:
                         lower_text = p_text.lower()
+                        
+                        # Пропускаем служебные параграфы
                         skip_phrases = [
                             'subscribe', 'newsletter', 'sign up', 'follow us',
                             'share this', 'read more', 'comments', 'advertisement',
                             'immigration', 'weather', 'education', 'transportation',
                             'abortion', 'lgbtq', 'notable deaths', 'sections',
-                            'morning wire', 'afternoon wire', 'newsletters'
+                            'morning wire', 'afternoon wire', 'newsletters',
+                            'click here', 'privacy policy', 'terms of use'
                         ]
                         
                         skip = False
@@ -619,6 +631,7 @@ class NewsBot:
             )
 
             if not articles:
+                logger.warning("⚠️ Не удалось получить список статей AP News")
                 return []
 
             news_items = []
@@ -647,7 +660,7 @@ class NewsBot:
                     })
                     logger.info(f"✅ Статья добавлена")
                 else:
-                    logger.warning(f"❌ Не удалось спарсить")
+                    logger.warning(f"❌ Не удалось спарсить статью AP News")
 
                 await asyncio.sleep(random.randint(3, 8))
 
@@ -666,7 +679,6 @@ class NewsBot:
             
             logger.info(f"🔄 {source_name} (RSS)")
 
-            # Выбираем функцию парсера
             if parser_name == 'infobrics':
                 parser_func = self.parse_infobrics
             elif parser_name == 'globalresearch':
@@ -674,7 +686,6 @@ class NewsBot:
             else:
                 parser_func = self.parse_infobrics
 
-            # Парсим RSS
             feed = feedparser.parse(feed_url)
             if feed.bozo:
                 logger.error(f"❌ Ошибка RSS {source_name}: {feed.bozo_exception}")
@@ -683,7 +694,7 @@ class NewsBot:
             logger.info(f"📰 В RSS {len(feed.entries)} статей")
 
             news_items = []
-            for entry in feed.entries[:5]:  # Берем первые 5 статей
+            for entry in feed.entries[:5]:
                 link = entry.get('link', '')
                 title = entry.get('title', 'Без заголовка')
 
@@ -709,7 +720,7 @@ class NewsBot:
                     })
                     logger.info(f"✅ Статья добавлена")
                 else:
-                    logger.warning(f"❌ Не удалось спарсить")
+                    logger.warning(f"❌ Не удалось спарсить {source_name}")
 
                 await asyncio.sleep(random.randint(3, 8))
 
@@ -986,14 +997,15 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 9.2 - ИСПРАВЛЕННЫЙ GLOBAL RESEARCH")
+        logger.info("🚀 NEWS BOT 9.3 - ИСПРАВЛЕННЫЕ ИНТЕРВАЛЫ")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
-        logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: не чаще 2 за 35 мин, не реже 1 в 2 часа")
+        logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ:")
+        logger.info(f"   - Минимальный интервал: {MIN_POST_INTERVAL//60} минут")
+        logger.info(f"   - Максимальный интервал: {MAX_POST_INTERVAL//60} минут")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
         logger.info(f"🔒 Защита от дублей: {len(self.sent_links)} ссылок")
-        logger.info(f"🧹 Удаление мета-данных: ВКЛЮЧЕНО")
         logger.info("="*80)
 
         logger.info("📡 ИСТОЧНИКИ:")
