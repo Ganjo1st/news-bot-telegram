@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 12.0
-С АВТОРИЗАЦИЕЙ НА 9111.RU ЧЕРЕЗ КОД ИЗ ПОЧТЫ
+🤖 Telegram News Bot - Версия 12.1
+ИСПРАВЛЕННАЯ ЗАЩИТА ОТ ДУБЛЕЙ
 """
 
 import os
@@ -53,8 +53,6 @@ CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
 
 # ДАННЫЕ ДЛЯ 9111.RU
 EMAIL_9111 = os.getenv('EMAIL_9111', 'ganjo1986@mail.ru')
-# Для mail.ru нужно настроить IMAP и получить пароль приложения
-# https://help.mail.ru/mail/security/protection/external
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD', 'ваш_пароль_приложения')
 EMAIL_SERVER = 'imap.mail.ru'
 EMAIL_PORT = 993
@@ -105,7 +103,7 @@ TELEGRAM_MAX_CAPTION = 1024
 # ============================================================
 class NewsBot:
     def __init__(self):
-        # Создаем файлы
+        # Создаем файлы если их нет
         for file in [SENT_LINKS_FILE, SENT_HASHES_FILE, SENT_TITLES_FILE, POSTS_LOG_FILE]:
             if not os.path.exists(file):
                 with open(file, 'w', encoding='utf-8') as f:
@@ -126,13 +124,35 @@ class NewsBot:
         self.last_post_time = None
         self.post_queue = []
         
-        # Сессия для 9111.ru (чтобы не логиниться каждый раз)
+        # Сессия для 9111.ru
         self._driver = None
         
         logger.info(f"📊 Загружено {len(self.sent_links)} ссылок")
         logger.info(f"📊 Загружено {len(self.sent_hashes)} хешей")
         logger.info(f"📊 Загружено {len(self.sent_titles)} заголовков")
         logger.info(f"📧 Email для 9111.ru: {EMAIL_9111}")
+
+    # ========== ДИАГНОСТИКА ==========
+    def debug_databases(self):
+        """Показывает содержимое баз данных для отладки"""
+        logger.info("="*60)
+        logger.info("🔍 ДИАГНОСТИКА БАЗ ДАННЫХ:")
+        logger.info("="*60)
+        
+        logger.info(f"📊 sent_links.json: {len(self.sent_links)} записей")
+        if len(self.sent_links) > 0:
+            links_list = list(self.sent_links)[-5:]
+            for i, link in enumerate(links_list):
+                logger.info(f"   {i+1}. {link}")
+        
+        logger.info(f"📊 sent_titles.json: {len(self.sent_titles)} записей")
+        if len(self.sent_titles) > 0:
+            titles_list = list(self.sent_titles)[-5:]
+            for i, title in enumerate(titles_list):
+                logger.info(f"   {i+1}. {title[:50]}...")
+        
+        logger.info(f"📊 sent_hashes.json: {len(self.sent_hashes)} записей")
+        logger.info("="*60)
 
     # ========== РАБОТА С JSON ==========
     def load_json(self, filename):
@@ -156,8 +176,11 @@ class NewsBot:
 
     def save_set(self, filename, data):
         try:
+            # Преобразуем set в list для сохранения
+            data_list = list(data)
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(list(data), f, ensure_ascii=False, indent=2)
+                json.dump(data_list, f, ensure_ascii=False, indent=2)
+            logger.debug(f"💾 Сохранено {len(data_list)} записей в {filename}")
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения {filename}: {e}")
 
@@ -173,59 +196,84 @@ class NewsBot:
         if not title:
             return ""
         title = title.lower()
-        title = re.sub(r'[^\w\s]', '', title)
+        # Удаляем знаки препинания и лишние пробелы
+        title = re.sub(r'[^\w\s]', ' ', title)
         title = re.sub(r'\s+', ' ', title).strip()
-        return title[:100]
+        # Берем первые 50 символов для сравнения
+        return title[:50]
 
     def create_content_hash(self, content):
         if not content:
             return None
-        sample = content[:500].encode('utf-8')
+        # Берем первые 300 символов текста
+        sample = content[:300].encode('utf-8')
         return hashlib.md5(sample).hexdigest()
 
     def is_duplicate(self, article_data):
+        """
+        ТРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ
+        """
         url = article_data.get('link', '')
         title = article_data.get('title', '')
         content = article_data.get('content', '')
         
-        if url in self.sent_links:
+        # УРОВЕНЬ 1: Проверка по URL
+        if url and url in self.sent_links:
             logger.info(f"⏭️ ДУБЛИКАТ (URL): {title[:50]}...")
             return True
         
-        norm_title = self.normalize_title(title)
-        if norm_title and norm_title in self.sent_titles:
-            logger.info(f"⏭️ ДУБЛИКАТ (заголовок): {title[:50]}...")
-            return True
+        # УРОВЕНЬ 2: Проверка по нормализованному заголовку
+        if title:
+            norm_title = self.normalize_title(title)
+            if norm_title and norm_title in self.sent_titles:
+                logger.info(f"⏭️ ДУБЛИКАТ (заголовок): {title[:50]}...")
+                return True
         
-        if content:
+        # УРОВЕНЬ 3: Проверка по хешу содержимого
+        if content and len(content) > 100:
             content_hash = self.create_content_hash(content)
             if content_hash and content_hash in self.sent_hashes:
                 logger.info(f"⏭️ ДУБЛИКАТ (содержимое): {title[:50]}...")
                 return True
         
+        logger.info(f"✅ УНИКАЛЬНАЯ: {title[:50]}...")
         return False
 
     def mark_as_sent(self, article_data):
+        """
+        Помечает статью как отправленную во всех трёх базах
+        """
         url = article_data.get('link', '')
         title = article_data.get('title', '')
         content = article_data.get('content', '')
         
+        added_count = 0
+        
+        # Добавляем URL
         if url:
             self.sent_links.add(url)
-            self.save_set(SENT_LINKS_FILE, self.sent_links)
+            added_count += 1
         
-        norm_title = self.normalize_title(title)
-        if norm_title:
-            self.sent_titles.add(norm_title)
-            self.save_set(SENT_TITLES_FILE, self.sent_titles)
+        # Добавляем нормализованный заголовок
+        if title:
+            norm_title = self.normalize_title(title)
+            if norm_title:
+                self.sent_titles.add(norm_title)
+                added_count += 1
         
-        if content:
+        # Добавляем хеш содержимого
+        if content and len(content) > 100:
             content_hash = self.create_content_hash(content)
             if content_hash:
                 self.sent_hashes.add(content_hash)
-                self.save_set(SENT_HASHES_FILE, self.sent_hashes)
+                added_count += 1
         
-        logger.info(f"✅ Статья помечена во всех базах")
+        # СОХРАНЯЕМ ВСЕ ТРИ БАЗЫ
+        self.save_set(SENT_LINKS_FILE, self.sent_links)
+        self.save_set(SENT_TITLES_FILE, self.sent_titles)
+        self.save_set(SENT_HASHES_FILE, self.sent_hashes)
+        
+        logger.info(f"✅ Статья помечена: {added_count}/3 записей добавлено")
 
     # ========== ПРОВЕРКА ЛИМИТОВ ==========
     def can_post_now(self):
@@ -308,10 +356,10 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
 
-    # ========== ПАРСЕРЫ (СОКРАЩЕНЫ) ==========
+    # ========== ПАРСЕР AP NEWS ==========
     def get_apnews_articles_v2(self):
         try:
-            logger.info("🌐 Парсинг AP News")
+            logger.info("🌐 Парсинг главной страницы AP News")
             headers = {'User-Agent': 'Mozilla/5.0'}
             response = requests.get('https://apnews.com/', headers=headers, timeout=15)
             if response.status_code != 200:
@@ -346,7 +394,7 @@ class NewsBot:
                     seen_urls.add(article['url'])
                     unique_articles.append(article)
 
-            return unique_articles[:10]
+            return unique_articles[:5]
 
         except Exception as e:
             logger.error(f"❌ Ошибка AP News: {e}")
@@ -376,6 +424,7 @@ class NewsBot:
                 return None
             
             title = re.sub(r'\s*\|.*AP\s*News.*$', '', title, flags=re.IGNORECASE)
+            title = self.clean_text(title)
 
             # Изображение
             main_image = None
@@ -415,6 +464,7 @@ class NewsBot:
             logger.error(f"❌ Ошибка парсинга: {e}")
             return None
 
+    # ========== ПАРСЕР INFOBRICS ==========
     def parse_infobrics(self, url, source_name):
         try:
             logger.info(f"🌐 Парсинг InfoBrics: {url}")
@@ -463,6 +513,7 @@ class NewsBot:
             logger.error(f"❌ Ошибка InfoBrics: {e}")
             return None
 
+    # ========== ПАРСЕР GLOBAL RESEARCH ==========
     def parse_globalresearch(self, url, source_name):
         try:
             logger.info(f"🌐 Парсинг Global Research: {url}")
@@ -511,6 +562,7 @@ class NewsBot:
             logger.error(f"❌ Ошибка Global Research: {e}")
             return None
 
+    # ========== ЗАГРУЗКА НОВОСТЕЙ ==========
     async def fetch_from_apnews_v2(self):
         try:
             logger.info("🔄 AP News")
@@ -519,7 +571,7 @@ class NewsBot:
                 return []
 
             news_items = []
-            for article in articles[:3]:
+            for article in articles[:2]:  # Берем первые 2
                 url = article['url']
                 title = article['title']
 
@@ -527,24 +579,26 @@ class NewsBot:
                     logger.info(f"⏭️ УЖЕ БЫЛО (URL): {title[:50]}...")
                     continue
 
+                logger.info(f"🔍 НОВАЯ: {title[:50]}...")
                 article_data = await asyncio.get_event_loop().run_in_executor(
                     None, self.parse_apnews_article_v2, url, "AP News"
                 )
 
-                if article_data and not self.is_duplicate({
-                    'link': url,
-                    'title': article_data['title'],
-                    'content': article_data['content']
-                }):
-                    news_items.append({
-                        'source': 'AP News',
-                        'title': article_data['title'],
-                        'content': article_data['content'],
+                if article_data:
+                    if not self.is_duplicate({
                         'link': url,
-                        'main_image': article_data.get('main_image'),
-                        'priority': 1
-                    })
-                    logger.info(f"✅ Статья добавлена")
+                        'title': article_data['title'],
+                        'content': article_data['content']
+                    }):
+                        news_items.append({
+                            'source': 'AP News',
+                            'title': article_data['title'],
+                            'content': article_data['content'],
+                            'link': url,
+                            'main_image': article_data.get('main_image'),
+                            'priority': 1
+                        })
+                        logger.info(f"✅ Статья добавлена в очередь")
                 await asyncio.sleep(random.randint(3, 8))
 
             return news_items
@@ -566,7 +620,7 @@ class NewsBot:
                 return []
 
             news_items = []
-            for entry in feed.entries[:3]:
+            for entry in feed.entries[:2]:  # Берем первые 2
                 link = entry.get('link', '')
                 title = entry.get('title', 'Без заголовка')
 
@@ -574,24 +628,26 @@ class NewsBot:
                     logger.info(f"⏭️ УЖЕ БЫЛО (URL): {title[:50]}...")
                     continue
 
+                logger.info(f"🔍 НОВАЯ: {title[:50]}...")
                 article_data = await asyncio.get_event_loop().run_in_executor(
                     None, parser_func, link, source_name
                 )
 
-                if article_data and not self.is_duplicate({
-                    'link': link,
-                    'title': article_data['title'],
-                    'content': article_data['content']
-                }):
-                    news_items.append({
-                        'source': source_name,
-                        'title': article_data['title'],
-                        'content': article_data['content'],
+                if article_data:
+                    if not self.is_duplicate({
                         'link': link,
-                        'main_image': article_data.get('main_image'),
-                        'priority': priority
-                    })
-                    logger.info(f"✅ Статья добавлена")
+                        'title': article_data['title'],
+                        'content': article_data['content']
+                    }):
+                        news_items.append({
+                            'source': source_name,
+                            'title': article_data['title'],
+                            'content': article_data['content'],
+                            'link': link,
+                            'main_image': article_data.get('main_image'),
+                            'priority': priority
+                        })
+                        logger.info(f"✅ Статья добавлена в очередь")
                 await asyncio.sleep(random.randint(3, 8))
 
             return news_items
@@ -612,7 +668,7 @@ class NewsBot:
             await asyncio.sleep(random.randint(5, 10))
 
         all_news.sort(key=lambda x: x.get('priority', 5))
-        logger.info(f"📊 ВСЕГО УНИКАЛЬНЫХ СТАТЕЙ: {len(all_news)}")
+        logger.info(f"📊 ВСЕГО УНИКАЛЬНЫХ: {len(all_news)}")
         return all_news
 
     async def download_image(self, url):
@@ -806,17 +862,11 @@ class NewsBot:
                 logger.error(f"❌ Ошибка Telegram: {e}")
                 return False
 
-    # ============================================================
-    # НОВЫЙ МЕТОД: ПОЛУЧЕНИЕ КОДА ИЗ ПОЧТЫ MAIL.RU
-    # ============================================================
+    # ========== ПОЛУЧЕНИЕ КОДА ИЗ ПОЧТЫ ==========
     def get_code_from_email(self, timeout=120):
-        """
-        Подключается к почте mail.ru и ищет письмо с кодом
-        """
         logger.info(f"📧 Подключение к почте {EMAIL_9111}...")
         
         try:
-            # Подключаемся к IMAP серверу
             mail = imaplib.IMAP4_SSL(EMAIL_SERVER, EMAIL_PORT)
             mail.login(EMAIL_9111, EMAIL_PASSWORD)
             mail.select('inbox')
@@ -827,7 +877,6 @@ class NewsBot:
             code = None
             
             while time.time() - start_time < timeout:
-                # Ищем непрочитанные письма
                 status, messages = mail.search(None, 'UNSEEN')
                 if status != 'OK':
                     time.sleep(5)
@@ -838,25 +887,20 @@ class NewsBot:
                     if status != 'OK':
                         continue
                     
-                    # Парсим письмо
                     raw_email = data[0][1]
                     msg = email.message_from_bytes(raw_email)
                     
-                    # Получаем тему
                     subject, encoding = decode_header(msg['Subject'])[0]
                     if isinstance(subject, bytes):
                         subject = subject.decode(encoding or 'utf-8')
                     
                     logger.info(f"📨 Найдено письмо: {subject}")
                     
-                    # Ищем код в письме
                     if '9111' in subject.lower() or 'код' in subject.lower():
-                        # Получаем текст письма
                         if msg.is_multipart():
                             for part in msg.walk():
                                 if part.get_content_type() == 'text/plain':
                                     body = part.get_payload(decode=True).decode()
-                                    # Ищем 6-значный код
                                     codes = re.findall(r'\b\d{6}\b', body)
                                     if codes:
                                         code = codes[0]
@@ -888,17 +932,12 @@ class NewsBot:
             logger.error(f"❌ Ошибка при работе с почтой: {e}")
             return None
 
-    # ============================================================
-    # НОВЫЙ МЕТОД: АВТОРИЗАЦИЯ НА 9111.RU ЧЕРЕЗ КОД
-    # ============================================================
+    # ========== АВТОРИЗАЦИЯ НА 9111.RU ==========
     def login_9111_with_code(self, driver):
-        """
-        Авторизация на 9111.ru с помощью кода из почты
-        """
         try:
             logger.info("🔑 Начинаем авторизацию на 9111.ru...")
             
-            # Ждём появления кнопки "Вход"
+            # Ждём кнопку "Вход"
             login_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'Вход')]"))
             )
@@ -919,8 +958,8 @@ class NewsBot:
             get_code_btn.click()
             logger.info("✅ Запрошен код подтверждения")
             
-            # Ждём письмо и получаем код
-            logger.info("⏳ Ожидание кода из почты (до 2 минут)...")
+            # Ждём код из почты
+            logger.info("⏳ Ожидание кода из почты...")
             code = self.get_code_from_email(timeout=120)
             
             if not code:
@@ -940,31 +979,24 @@ class NewsBot:
             confirm_btn.click()
             logger.info("✅ Отправлен код подтверждения")
             
-            # Ждём успешного входа
             time.sleep(5)
             
-            # Проверяем, что мы авторизованы
+            # Проверяем успешность
             if "личный кабинет" in driver.page_source.lower() or "профиль" in driver.page_source.lower():
                 logger.info("✅ Успешная авторизация на 9111.ru")
                 return True
             else:
                 logger.warning("⚠️ Возможно, авторизация не удалась")
-                return True  # Всё равно считаем успехом
+                return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка авторизации: {e}")
             return False
 
-    # ============================================================
-    # МЕТОД: ПУБЛИКАЦИЯ НА 9111.RU
-    # ============================================================
+    # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
     def publish_to_9111(self, post_text):
-        """
-        Публикация поста на 9111.ru через Selenium
-        """
         logger.info("🌐 Запуск Selenium для 9111.ru...")
         
-        # НАСТРОЙКИ ДЛЯ HEADLESS CHROME
         chrome_options = Options()
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
@@ -975,7 +1007,6 @@ class NewsBot:
         
         driver = None
         try:
-            # ЗАПУСК ДРАЙВЕРА
             if os.path.exists("/usr/bin/chromedriver"):
                 service = Service("/usr/bin/chromedriver")
                 driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -984,28 +1015,24 @@ class NewsBot:
             
             logger.info("✅ Браузер запущен")
             
-            # ===== ШАГ 1: ОТКРЫВАЕМ ГЛАВНУЮ =====
             driver.get("https://www.9111.ru")
             logger.info("🌐 Открыта главная страница")
             time.sleep(3)
             
-            # ===== ШАГ 2: АВТОРИЗАЦИЯ =====
             if not self.login_9111_with_code(driver):
                 logger.error("❌ Не удалось авторизоваться")
                 return False
             
-            # ===== ШАГ 3: ПЕРЕХОДИМ В РАЗДЕЛ ПУБЛИКАЦИИ =====
             driver.get("https://www.9111.ru/my/#anketaTitles")
             logger.info("📝 Открыта страница публикации")
             time.sleep(5)
             
-            # ===== ШАГ 4: ИЩЕМ ПОЛЕ ДЛЯ ТЕКСТА =====
+            # Ищем поле для текста
             text_area = None
             text_selectors = [
                 "//textarea",
                 "//div[@contenteditable='true']",
-                "//div[@class='editor']",
-                "//div[contains(@class,'post')]//textarea"
+                "//div[@class='editor']"
             ]
             
             for selector in text_selectors:
@@ -1026,7 +1053,7 @@ class NewsBot:
                 logger.error("❌ Поле для текста не найдено")
                 return False
             
-            # ===== ШАГ 5: НАЖИМАЕМ КНОПКУ ПУБЛИКАЦИИ =====
+            # Ищем кнопку публикации
             publish_btn = None
             publish_selectors = [
                 "//button[contains(text(),'Опубликовать')]",
@@ -1063,9 +1090,7 @@ class NewsBot:
                 driver.quit()
                 logger.info("🔄 Браузер закрыт")
 
-    # ============================================================
-    # ОСНОВНАЯ ЛОГИКА
-    # ============================================================
+    # ========== ОСНОВНАЯ ЛОГИКА ==========
     async def check_and_publish(self):
         logger.info("="*60)
         logger.info(f"🔍 ПРОВЕРКА: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1100,18 +1125,15 @@ class NewsBot:
         post_data = await self.create_single_post(item)
 
         if post_data:
-            # 1. ПУБЛИКУЕМ В TELEGRAM
             tg_success = await self.publish_post(post_data)
             
             if tg_success:
-                # 2. ПУБЛИКУЕМ НА 9111.RU
+                # Публикация на 9111.ru
                 logger.info("🔄 Пробуем опубликовать на 9111.ru...")
                 
-                # Получаем текст без HTML
                 plain_text = re.sub(r'<[^>]+>', '', post_data['caption'])
                 plain_text = re.sub(r'&[a-z]+;', '', plain_text)
                 
-                # Запускаем Selenium в отдельном потоке
                 loop = asyncio.get_event_loop()
                 success_9111 = await loop.run_in_executor(
                     None, 
@@ -1141,15 +1163,17 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 12.0 - С ВХОДОМ ПО КОДУ ИЗ ПОЧТЫ")
+        logger.info("🚀 NEWS BOT 12.1 - ИСПРАВЛЕННАЯ ЗАЩИТА ОТ ДУБЛЕЙ")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
-        logger.info(f"🔒 Защита от дублей: {len(self.sent_links)} ссылок")
         logger.info(f"📧 Почта: {EMAIL_9111}")
         logger.info("="*80)
+
+        # Показываем диагностику
+        self.debug_databases()
 
         try:
             me = await self.bot.get_me()
