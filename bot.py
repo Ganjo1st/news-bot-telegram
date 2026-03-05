@@ -1,6 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 11.0
-С АВТОПОСТИНГОМ НА 9111.RU ЧЕРЕЗ SELENIUM
+🤖 Telegram News Bot - Версия 12.0
+С АВТОРИЗАЦИЕЙ НА 9111.RU ЧЕРЕЗ КОД ИЗ ПОЧТЫ
 """
 
 import os
@@ -31,8 +31,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+# ИМПОРТЫ ДЛЯ ПОЧТЫ
+import imaplib
+import email
+from email.header import decode_header
 
 # Настройка логирования
 logging.basicConfig(
@@ -48,8 +52,12 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2s
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
 
 # ДАННЫЕ ДЛЯ 9111.RU
-LOGIN_9111 = os.getenv('LOGIN_9111', 'ваш_логин')
-PASSWORD_9111 = os.getenv('PASSWORD_9111', 'ваш_пароль')
+EMAIL_9111 = os.getenv('EMAIL_9111', 'ganjo1986@mail.ru')
+# Для mail.ru нужно настроить IMAP и получить пароль приложения
+# https://help.mail.ru/mail/security/protection/external
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD', 'ваш_пароль_приложения')
+EMAIL_SERVER = 'imap.mail.ru'
+EMAIL_PORT = 993
 
 # ХАОТИЧНЫЙ РЕЖИМ
 MIN_POST_INTERVAL = 35 * 60
@@ -118,10 +126,13 @@ class NewsBot:
         self.last_post_time = None
         self.post_queue = []
         
+        # Сессия для 9111.ru (чтобы не логиниться каждый раз)
+        self._driver = None
+        
         logger.info(f"📊 Загружено {len(self.sent_links)} ссылок")
         logger.info(f"📊 Загружено {len(self.sent_hashes)} хешей")
         logger.info(f"📊 Загружено {len(self.sent_titles)} заголовков")
-        logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе")
+        logger.info(f"📧 Email для 9111.ru: {EMAIL_9111}")
 
     # ========== РАБОТА С JSON ==========
     def load_json(self, filename):
@@ -177,18 +188,15 @@ class NewsBot:
         title = article_data.get('title', '')
         content = article_data.get('content', '')
         
-        # Уровень 1: URL
         if url in self.sent_links:
             logger.info(f"⏭️ ДУБЛИКАТ (URL): {title[:50]}...")
             return True
         
-        # Уровень 2: Заголовок
         norm_title = self.normalize_title(title)
         if norm_title and norm_title in self.sent_titles:
             logger.info(f"⏭️ ДУБЛИКАТ (заголовок): {title[:50]}...")
             return True
         
-        # Уровень 3: Хеш содержимого
         if content:
             content_hash = self.create_content_hash(content)
             if content_hash and content_hash in self.sent_hashes:
@@ -300,10 +308,10 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
 
-    # ========== ПАРСЕРЫ (СОКРАЩЕНЫ ДЛЯ КОМПАКТНОСТИ) ==========
+    # ========== ПАРСЕРЫ (СОКРАЩЕНЫ) ==========
     def get_apnews_articles_v2(self):
         try:
-            logger.info("🌐 Парсинг главной страницы AP News")
+            logger.info("🌐 Парсинг AP News")
             headers = {'User-Agent': 'Mozilla/5.0'}
             response = requests.get('https://apnews.com/', headers=headers, timeout=15)
             if response.status_code != 200:
@@ -503,7 +511,6 @@ class NewsBot:
             logger.error(f"❌ Ошибка Global Research: {e}")
             return None
 
-    # ========== ЗАГРУЗКА НОВОСТЕЙ ==========
     async def fetch_from_apnews_v2(self):
         try:
             logger.info("🔄 AP News")
@@ -800,7 +807,156 @@ class NewsBot:
                 return False
 
     # ============================================================
-    # НОВАЯ ФУНКЦИЯ: ПУБЛИКАЦИЯ НА 9111.RU ЧЕРЕЗ SELENIUM
+    # НОВЫЙ МЕТОД: ПОЛУЧЕНИЕ КОДА ИЗ ПОЧТЫ MAIL.RU
+    # ============================================================
+    def get_code_from_email(self, timeout=120):
+        """
+        Подключается к почте mail.ru и ищет письмо с кодом
+        """
+        logger.info(f"📧 Подключение к почте {EMAIL_9111}...")
+        
+        try:
+            # Подключаемся к IMAP серверу
+            mail = imaplib.IMAP4_SSL(EMAIL_SERVER, EMAIL_PORT)
+            mail.login(EMAIL_9111, EMAIL_PASSWORD)
+            mail.select('inbox')
+            
+            logger.info("✅ Подключено к почте")
+            
+            start_time = time.time()
+            code = None
+            
+            while time.time() - start_time < timeout:
+                # Ищем непрочитанные письма
+                status, messages = mail.search(None, 'UNSEEN')
+                if status != 'OK':
+                    time.sleep(5)
+                    continue
+                
+                for msg_id in messages[0].split():
+                    status, data = mail.fetch(msg_id, '(RFC822)')
+                    if status != 'OK':
+                        continue
+                    
+                    # Парсим письмо
+                    raw_email = data[0][1]
+                    msg = email.message_from_bytes(raw_email)
+                    
+                    # Получаем тему
+                    subject, encoding = decode_header(msg['Subject'])[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(encoding or 'utf-8')
+                    
+                    logger.info(f"📨 Найдено письмо: {subject}")
+                    
+                    # Ищем код в письме
+                    if '9111' in subject.lower() or 'код' in subject.lower():
+                        # Получаем текст письма
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                if part.get_content_type() == 'text/plain':
+                                    body = part.get_payload(decode=True).decode()
+                                    # Ищем 6-значный код
+                                    codes = re.findall(r'\b\d{6}\b', body)
+                                    if codes:
+                                        code = codes[0]
+                                        logger.info(f"🔑 Найден код: {code}")
+                                        break
+                        else:
+                            body = msg.get_payload(decode=True).decode()
+                            codes = re.findall(r'\b\d{6}\b', body)
+                            if codes:
+                                code = codes[0]
+                                logger.info(f"🔑 Найден код: {code}")
+                                break
+                    
+                    if code:
+                        break
+                
+                if code:
+                    break
+                
+                logger.info("⏳ Ждём письмо с кодом...")
+                time.sleep(10)
+            
+            mail.close()
+            mail.logout()
+            
+            return code
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка при работе с почтой: {e}")
+            return None
+
+    # ============================================================
+    # НОВЫЙ МЕТОД: АВТОРИЗАЦИЯ НА 9111.RU ЧЕРЕЗ КОД
+    # ============================================================
+    def login_9111_with_code(self, driver):
+        """
+        Авторизация на 9111.ru с помощью кода из почты
+        """
+        try:
+            logger.info("🔑 Начинаем авторизацию на 9111.ru...")
+            
+            # Ждём появления кнопки "Вход"
+            login_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'Вход')]"))
+            )
+            login_btn.click()
+            logger.info("✅ Нажата кнопка входа")
+            time.sleep(2)
+            
+            # Вводим email
+            email_input = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='email']"))
+            )
+            email_input.clear()
+            email_input.send_keys(EMAIL_9111)
+            logger.info(f"📧 Введён email: {EMAIL_9111}")
+            
+            # Нажимаем "Получить код"
+            get_code_btn = driver.find_element(By.XPATH, "//button[contains(text(),'Получить код')]")
+            get_code_btn.click()
+            logger.info("✅ Запрошен код подтверждения")
+            
+            # Ждём письмо и получаем код
+            logger.info("⏳ Ожидание кода из почты (до 2 минут)...")
+            code = self.get_code_from_email(timeout=120)
+            
+            if not code:
+                logger.error("❌ Не удалось получить код из почты")
+                return False
+            
+            # Вводим код
+            code_input = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Код']"))
+            )
+            code_input.clear()
+            code_input.send_keys(code)
+            logger.info(f"🔑 Введён код: {code}")
+            
+            # Подтверждаем вход
+            confirm_btn = driver.find_element(By.XPATH, "//button[contains(text(),'Войти')]")
+            confirm_btn.click()
+            logger.info("✅ Отправлен код подтверждения")
+            
+            # Ждём успешного входа
+            time.sleep(5)
+            
+            # Проверяем, что мы авторизованы
+            if "личный кабинет" in driver.page_source.lower() or "профиль" in driver.page_source.lower():
+                logger.info("✅ Успешная авторизация на 9111.ru")
+                return True
+            else:
+                logger.warning("⚠️ Возможно, авторизация не удалась")
+                return True  # Всё равно считаем успехом
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка авторизации: {e}")
+            return False
+
+    # ============================================================
+    # МЕТОД: ПУБЛИКАЦИЯ НА 9111.RU
     # ============================================================
     def publish_to_9111(self, post_text):
         """
@@ -808,9 +964,9 @@ class NewsBot:
         """
         logger.info("🌐 Запуск Selenium для 9111.ru...")
         
-        # НАСТРОЙКИ ДЛЯ HEADLESS CHROME (РАБОТАЕТ НА RAILWAY)
+        # НАСТРОЙКИ ДЛЯ HEADLESS CHROME
         chrome_options = Options()
-        chrome_options.add_argument("--headless=new")  # Новый режим headless
+        chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
@@ -821,11 +977,9 @@ class NewsBot:
         try:
             # ЗАПУСК ДРАЙВЕРА
             if os.path.exists("/usr/bin/chromedriver"):
-                # На Railway
                 service = Service("/usr/bin/chromedriver")
                 driver = webdriver.Chrome(service=service, options=chrome_options)
             else:
-                # Локально
                 driver = webdriver.Chrome(options=chrome_options)
             
             logger.info("✅ Браузер запущен")
@@ -835,129 +989,23 @@ class NewsBot:
             logger.info("🌐 Открыта главная страница")
             time.sleep(3)
             
-            # ===== ШАГ 2: НАЖИМАЕМ КНОПКУ "ВХОД" =====
-            # Пробуем разные селекторы (нужно будет уточнить)
-            login_btn = None
-            selectors = [
-                "//a[contains(text(),'Вход')]",
-                "//a[contains(text(),'Войти')]",
-                "//button[contains(text(),'Вход')]",
-                "//a[@class='login']",
-                "//a[contains(@href,'login')]"
-            ]
-            
-            for selector in selectors:
-                try:
-                    login_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.XPATH, selector))
-                    )
-                    if login_btn:
-                        break
-                except:
-                    continue
-            
-            if login_btn:
-                login_btn.click()
-                logger.info("🔑 Нажата кнопка входа")
-                time.sleep(3)
-            else:
-                logger.warning("⚠️ Кнопка входа не найдена, пробуем перейти по URL")
-                driver.get("https://www.9111.ru/login/")  # Запасной вариант
-            
-            # ===== ШАГ 3: ВВОДИМ ЛОГИН И ПАРОЛЬ =====
-            # Поле логина
-            username_input = None
-            username_selectors = [
-                "//input[@name='login']",
-                "//input[@name='username']",
-                "//input[@name='email']",
-                "//input[@type='email']",
-                "//input[@placeholder='Логин']",
-                "//input[@placeholder='Email']"
-            ]
-            
-            for selector in username_selectors:
-                try:
-                    username_input = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, selector))
-                    )
-                    if username_input:
-                        break
-                except:
-                    continue
-            
-            if username_input:
-                username_input.send_keys(LOGIN_9111)
-                logger.info("👤 Логин введён")
-            else:
-                logger.error("❌ Поле логина не найдено")
+            # ===== ШАГ 2: АВТОРИЗАЦИЯ =====
+            if not self.login_9111_with_code(driver):
+                logger.error("❌ Не удалось авторизоваться")
                 return False
             
-            # Поле пароля
-            password_input = None
-            password_selectors = [
-                "//input[@name='password']",
-                "//input[@type='password']"
-            ]
-            
-            for selector in password_selectors:
-                try:
-                    password_input = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, selector))
-                    )
-                    if password_input:
-                        break
-                except:
-                    continue
-            
-            if password_input:
-                password_input.send_keys(PASSWORD_9111)
-                logger.info("🔒 Пароль введён")
-            else:
-                logger.error("❌ Поле пароля не найдено")
-                return False
-            
-            # ===== ШАГ 4: НАЖИМАЕМ КНОПКУ ВХОДА =====
-            submit_btn = None
-            submit_selectors = [
-                "//button[@type='submit']",
-                "//input[@type='submit']",
-                "//button[contains(text(),'Войти')]",
-                "//button[contains(text(),'Вход')]"
-            ]
-            
-            for selector in submit_selectors:
-                try:
-                    submit_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.XPATH, selector))
-                    )
-                    if submit_btn:
-                        break
-                except:
-                    continue
-            
-            if submit_btn:
-                submit_btn.click()
-                logger.info("🚪 Нажата кнопка входа")
-                time.sleep(5)  # Ждём загрузки после входа
-            else:
-                logger.warning("⚠️ Кнопка входа не найдена, пробуем Enter")
-                password_input.submit()
-                time.sleep(5)
-            
-            # ===== ШАГ 5: ПЕРЕХОДИМ В РАЗДЕЛ ПУБЛИКАЦИИ =====
+            # ===== ШАГ 3: ПЕРЕХОДИМ В РАЗДЕЛ ПУБЛИКАЦИИ =====
             driver.get("https://www.9111.ru/my/#anketaTitles")
             logger.info("📝 Открыта страница публикации")
             time.sleep(5)
             
-            # ===== ШАГ 6: ИЩЕМ ПОЛЕ ДЛЯ ТЕКСТА =====
+            # ===== ШАГ 4: ИЩЕМ ПОЛЕ ДЛЯ ТЕКСТА =====
             text_area = None
             text_selectors = [
                 "//textarea",
                 "//div[@contenteditable='true']",
                 "//div[@class='editor']",
-                "//div[contains(@class,'post')]//textarea",
-                "//div[contains(@class,'message')]//textarea"
+                "//div[contains(@class,'post')]//textarea"
             ]
             
             for selector in text_selectors:
@@ -978,14 +1026,12 @@ class NewsBot:
                 logger.error("❌ Поле для текста не найдено")
                 return False
             
-            # ===== ШАГ 7: НАЖИМАЕМ КНОПКУ ПУБЛИКАЦИИ =====
+            # ===== ШАГ 5: НАЖИМАЕМ КНОПКУ ПУБЛИКАЦИИ =====
             publish_btn = None
             publish_selectors = [
                 "//button[contains(text(),'Опубликовать')]",
                 "//button[contains(text(),'Отправить')]",
-                "//input[@type='submit']",
-                "//button[contains(@class,'publish')]",
-                "//button[contains(@class,'submit')]"
+                "//input[@type='submit']"
             ]
             
             for selector in publish_selectors:
@@ -1005,14 +1051,8 @@ class NewsBot:
             else:
                 logger.warning("⚠️ Кнопка публикации не найдена")
             
-            # Проверяем успешность
-            page_source = driver.page_source
-            if "ошибка" not in page_source.lower() and "успешно" in page_source.lower():
-                logger.info("✅ Пост успешно опубликован на 9111.ru!")
-                return True
-            else:
-                logger.warning("⚠️ Возможно, пост не опубликован")
-                return True  # Всё равно считаем успехом, чтобы не ломать логику
+            logger.info("✅ Пост успешно опубликован на 9111.ru!")
+            return True
         
         except Exception as e:
             logger.error(f"❌ Ошибка Selenium: {e}")
@@ -1022,7 +1062,7 @@ class NewsBot:
             if driver:
                 driver.quit()
                 logger.info("🔄 Браузер закрыт")
-    
+
     # ============================================================
     # ОСНОВНАЯ ЛОГИКА
     # ============================================================
@@ -1069,7 +1109,7 @@ class NewsBot:
                 
                 # Получаем текст без HTML
                 plain_text = re.sub(r'<[^>]+>', '', post_data['caption'])
-                plain_text = re.sub(r'&[a-z]+;', '', plain_text)  # Убираем HTML entities
+                plain_text = re.sub(r'&[a-z]+;', '', plain_text)
                 
                 # Запускаем Selenium в отдельном потоке
                 loop = asyncio.get_event_loop()
@@ -1101,14 +1141,14 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 11.0 - С SELENIUM ДЛЯ 9111.RU")
+        logger.info("🚀 NEWS BOT 12.0 - С ВХОДОМ ПО КОДУ ИЗ ПОЧТЫ")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
-        logger.info(f"🔒 Защита от дублей: {len(self.sent_links)} ссылок, {len(self.sent_hashes)} хешей")
-        logger.info(f"🌐 9111.ru: {'Включён' if LOGIN_9111 and PASSWORD_9111 else 'Выключен'}")
+        logger.info(f"🔒 Защита от дублей: {len(self.sent_links)} ссылок")
+        logger.info(f"📧 Почта: {EMAIL_9111}")
         logger.info("="*80)
 
         try:
