@@ -9,6 +9,7 @@ import hashlib
 import logging
 import asyncio
 import random
+import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urljoin, urlparse
@@ -27,7 +28,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, WebDriverException
-import chromedriver_autoinstaller
+from webdriver_manager.chrome import ChromeDriverManager
 import telegram
 from telegram.error import TelegramError
 import httpx
@@ -36,9 +37,9 @@ import httpx
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "-1002484885240")
 
-# Для 9111.ru
-NINTH_EMAIL = os.getenv("NINTH_EMAIL", "your_email@example.com")  # Замените
-NINTH_PASSWORD = os.getenv("NINTH_PASSWORD", "your_password")      # Замените
+# Для 9111.ru (замените на свои данные)
+NINTH_EMAIL = os.getenv("NINTH_EMAIL", "")
+NINTH_PASSWORD = os.getenv("NINTH_PASSWORD", "")
 
 # Интервал проверки новых статей (в минутах)
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
@@ -57,7 +58,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -66,6 +67,9 @@ logger = logging.getLogger(__name__)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("selenium").setLevel(logging.WARNING)
+logging.getLogger("webdriver_manager").setLevel(logging.WARNING)
 
 
 class NewsBot:
@@ -76,12 +80,37 @@ class NewsBot:
         self.scheduler = BackgroundScheduler(timezone=pytz.UTC)
         self.state = self.load_state()
         
-        # Автоустановка ChromeDriver
-        chromedriver_autoinstaller.install()
-        logger.info("✅ ChromeDriver готов")
-        
-        # Для перевода (можно заменить на любой API)
+        # Для перевода
         self.translation_cache = {}
+        
+        # Проверяем наличие Chrome
+        self._check_chrome()
+    
+    def _check_chrome(self):
+        """Проверяет наличие Chrome и устанавливает при необходимости"""
+        try:
+            # Проверяем, установлен ли Chrome
+            result = subprocess.run(['which', 'google-chrome'], capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.info("🔄 Chrome не найден, устанавливаем...")
+                # Устанавливаем Chrome
+                subprocess.run(['apt-get', 'update'], check=False)
+                subprocess.run(['apt-get', 'install', '-y', 'wget', 'gnupg'], check=False)
+                subprocess.run(['wget', '-q', '-O', '-', 'https://dl-ssl.google.com/linux/linux_signing_key.pub'], check=False)
+                subprocess.run(['apt-key', 'add', '-'], input=result.stdout, check=False)
+                subprocess.run(['sh', '-c', 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'], check=False)
+                subprocess.run(['apt-get', 'update'], check=False)
+                subprocess.run(['apt-get', 'install', '-y', 'google-chrome-stable'], check=False)
+                logger.info("✅ Chrome установлен")
+            else:
+                chrome_path = result.stdout.strip()
+                logger.info(f"✅ Chrome найден: {chrome_path}")
+                
+                # Проверяем версию
+                version_result = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
+                logger.info(f"✅ Chrome версия: {version_result.stdout.strip()}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при проверке Chrome: {e}")
     
     # ==================== УПРАВЛЕНИЕ СОСТОЯНИЕМ ====================
     
@@ -455,6 +484,10 @@ class NewsBot:
         """
         driver = None
         try:
+            if not NINTH_EMAIL or not NINTH_PASSWORD:
+                logger.warning("⚠️ Креды для 9111.ru не указаны, пропускаем")
+                return False
+            
             logger.info("🌐 Запуск Selenium для 9111.ru...")
             
             chrome_options = Options()
@@ -464,8 +497,11 @@ class NewsBot:
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            chrome_options.add_argument("--remote-debugging-port=9222")
             
-            driver = webdriver.Chrome(options=chrome_options)
+            # Используем webdriver-manager для автоматической установки драйвера
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
             wait = WebDriverWait(driver, 20)
             
             # Переходим на сайт
@@ -662,13 +698,8 @@ class NewsBot:
             source=article['source']
         )
         
-        # Публикуем на 9111.ru (если есть креды)
-        ninth_success = False
-        if NINTH_EMAIL != "your_email@example.com" and NINTH_PASSWORD != "your_password":
-            logger.info("🔄 Пробуем опубликовать на 9111.ru...")
-            ninth_success = self.publish_to_9111(article['title'], article['text'])
-        else:
-            logger.warning("⚠️ Креды для 9111.ru не указаны, пропускаем")
+        # Публикуем на 9111.ru
+        ninth_success = self.publish_to_9111(article['title'], article['text'])
         
         if tg_success:
             # Сохраняем в историю
