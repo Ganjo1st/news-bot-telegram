@@ -432,7 +432,8 @@ class NewsBot:
                 logger.warning(f"⚠️ Мало текста ({len(text)} символов) для {url}")
                 return None
             
-            logger.info(f"✅ Текст извлечён: {len(text)} символов, {len(text.split('\n\n'))} абзацев")
+            paragraph_count = len(text.split('\n\n'))
+logger.info(f"✅ Текст извлечён: {len(text)} символов, {paragraph_count} абзацев")
             
             # Извлекаем изображение
             image_url = None
