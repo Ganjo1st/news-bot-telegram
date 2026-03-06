@@ -432,8 +432,9 @@ class NewsBot:
                 logger.warning(f"⚠️ Мало текста ({len(text)} символов) для {url}")
                 return None
             
+            # ИСПРАВЛЕНО: выносим split за пределы f-строки
             paragraph_count = len(text.split('\n\n'))
-logger.info(f"✅ Текст извлечён: {len(text)} символов, {paragraph_count} абзацев")
+            logger.info(f"✅ Текст извлечён: {len(text)} символов, {paragraph_count} абзацев")
             
             # Извлекаем изображение
             image_url = None
@@ -475,11 +476,16 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
     
     def _translate_part(self, text: str) -> str:
         """Переводит одну часть текста"""
+        if not text or len(text) < 20:
+            return text
+        
+        # Простой кэш
         cache_key = hashlib.md5(text.encode()).hexdigest()
         if cache_key in self.translation_cache:
             return self.translation_cache[cache_key]
         
         try:
+            # Используем публичный экземпляр LibreTranslate
             response = requests.post(
                 "https://libretranslate.com/translate",
                 json={
@@ -494,7 +500,7 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
             if response.status_code == 200:
                 result = response.json().get("translatedText", text)
                 self.translation_cache[cache_key] = result
-                time.sleep(0.5)
+                time.sleep(0.5)  # Не перегружаем сервис
                 return result
             else:
                 logger.warning(f"⚠️ Ошибка перевода: {response.status_code}")
@@ -507,16 +513,20 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
     def publish_to_telegram(self, title: str, text: str, image_url: str = None, source: str = "") -> bool:
         """Публикует пост в Telegram канал"""
         try:
+            # Формируем сообщение
             if source:
                 message = f"<b>{title}</b>\n\n{text}\n\n<i>Источник: {source}</i>"
             else:
                 message = f"<b>{title}</b>\n\n{text}"
             
+            # Ограничение длины (Telegram лимит 4096 символов)
             if len(message) > 4096:
                 message = message[:4000] + "...\n\n<i>Продолжение в источнике</i>"
             
             if image_url:
+                # Скачиваем изображение
                 img_data = requests.get(image_url, timeout=15).content
+                # Отправляем с фото
                 self.tg_bot.send_photo(
                     chat_id=TELEGRAM_CHANNEL_ID,
                     photo=img_data,
@@ -524,6 +534,7 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
                     parse_mode='HTML'
                 )
             else:
+                # Отправляем только текст
                 self.tg_bot.send_message(
                     chat_id=TELEGRAM_CHANNEL_ID,
                     text=message,
@@ -559,18 +570,102 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
             chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             chrome_options.add_argument("--remote-debugging-port=9222")
             
+            # Используем webdriver-manager для автоматической установки драйвера
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
             wait = WebDriverWait(driver, 20)
             
+            # Переходим на сайт
             driver.get("https://www.9111.ru")
             time.sleep(3)
             
-            # Здесь код авторизации (ваш существующий код)
+            # Ищем кнопку входа/логин
+            try:
+                login_btn = wait.until(
+                    EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Вход') or contains(@href, 'login')]"))
+                )
+                login_btn.click()
+                time.sleep(2)
+                
+                # Вводим email/логин
+                email_input = wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or @name='email' or @name='login']"))
+                )
+                email_input.send_keys(NINTH_EMAIL)
+                
+                # Вводим пароль
+                password_input = driver.find_element(By.XPATH, "//input[@type='password']")
+                password_input.send_keys(NINTH_PASSWORD)
+                
+                # Отправляем форму
+                submit_btn = driver.find_element(By.XPATH, "//button[@type='submit']")
+                submit_btn.click()
+                time.sleep(5)
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Возможно, уже авторизованы: {e}")
             
-            logger.info("✅ Пост на 9111.ru опубликован")
-            return True
+            # Ищем кнопку создания поста/статьи
+            try:
+                create_btn = wait.until(
+                    EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Добавить') or contains(text(), 'Создать') or contains(@href, 'add')]"))
+                )
+                create_btn.click()
+                time.sleep(3)
+            except:
+                # Пробуем перейти напрямую
+                driver.get("https://www.9111.ru/blogs/add/")
+                time.sleep(3)
             
+            # Заполняем заголовок
+            try:
+                title_input = wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@name='title' or @placeholder='Заголовок']"))
+                )
+                title_input.clear()
+                title_input.send_keys(title[:255])  # ограничение длины
+            except Exception as e:
+                logger.error(f"❌ Не найдено поле заголовка: {e}")
+                return False
+            
+            # Заполняем текст
+            try:
+                # Ищем textarea или div с contenteditable
+                text_area = driver.find_element(By.XPATH, "//textarea[@name='text' or @name='content']")
+                text_area.clear()
+                # Разбиваем на параграфы
+                paragraphs = text.split('\n\n')
+                for p in paragraphs:
+                    text_area.send_keys(p)
+                    text_area.send_keys('\n\n')
+            except:
+                try:
+                    # Пробуем contenteditable
+                    editor = driver.find_element(By.XPATH, "//div[@contenteditable='true']")
+                    editor.clear()
+                    paragraphs = text.split('\n\n')
+                    for p in paragraphs:
+                        editor.send_keys(p)
+                        editor.send_keys('\n\n')
+                except Exception as e:
+                    logger.error(f"❌ Не найдено поле текста: {e}")
+                    return False
+            
+            # Публикуем
+            try:
+                publish_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Опубликовать') or contains(text(), 'Сохранить')]")
+                publish_btn.click()
+                time.sleep(5)
+                
+                logger.info("✅ Пост на 9111.ru опубликован")
+                return True
+            except Exception as e:
+                logger.error(f"❌ Не найдена кнопка публикации: {e}")
+                return False
+            
+        except WebDriverException as e:
+            logger.error(f"❌ Ошибка Selenium: {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Ошибка при публикации на 9111.ru: {e}")
             return False
@@ -586,6 +681,7 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
         
         all_candidates = []
         
+        # Собираем с разных источников
         all_candidates.extend(self.fetch_ap_news())
         all_candidates.extend(self.fetch_global_research())
         
@@ -597,29 +693,36 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
         
         logger.info(f"📊 Найдено кандидатов: {len(all_candidates)}")
         
+        # Для каждого кандидата парсим полный текст и добавляем в очередь
         added = 0
         for candidate in all_candidates:
             try:
+                # Парсим полную статью
                 result = self.parse_article_content(candidate["url"], candidate["source"])
                 if not result:
                     continue
                 
                 text, image_url, full_title = result
+                
+                # Генерируем окончательный хэш
                 content_hash = self.generate_content_hash(full_title, text)
                 
+                # Проверяем дубликат
                 if self.is_duplicate(content_hash):
                     logger.info(f"⏭️ УЖЕ БЫЛО (контент): {full_title[:70]}...")
                     continue
                 
+                # Переводим
                 logger.info(f"🔄 Перевод: {full_title[:50]}...")
                 ru_title = self.translate_text(full_title)
-                ru_text = self.translate_text(text[:2000])
+                ru_text = self.translate_text(text[:2000])  # Переводим начало текста
                 
+                # Добавляем в очередь
                 self.state["queue"].append({
                     "title": ru_title,
                     "original_title": full_title,
                     "text": ru_text,
-                    "full_text": text,
+                    "full_text": text,  # сохраняем оригинал на будущее
                     "image_url": image_url,
                     "source": candidate["source"],
                     "url": candidate["url"],
@@ -644,6 +747,7 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
             logger.info("📭 Очередь пуста")
             return False
         
+        # Берём первую статью из очереди
         article = self.state["queue"].pop(0)
         
         logger.info("\n" + "=" * 60)
@@ -651,6 +755,7 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
         logger.info(f"   Источник: {article['source']}")
         logger.info("=" * 60)
         
+        # Публикуем в Telegram
         tg_success = self.publish_to_telegram(
             title=article['title'],
             text=article['text'],
@@ -658,11 +763,13 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
             source=article['source']
         )
         
+        # Публикуем на 9111.ru (если есть креды)
         ninth_success = False
         if NINTH_EMAIL and NINTH_PASSWORD:
             ninth_success = self.publish_to_9111(article['title'], article['text'])
         
         if tg_success:
+            # Сохраняем в историю
             self.state["published_articles"][article["content_hash"]] = {
                 "title": article["title"],
                 "timestamp": datetime.now().isoformat(),
@@ -678,21 +785,27 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
             else:
                 logger.warning("⚠️ Пост опубликован только в Telegram")
             
+            # Генерируем случайный интервал для следующей публикации
             next_interval = random.randint(35, 120)
-            logger.info(f"⏰ Следующая публикация через {next_interval} минут")
+            logger.info(f"⏰ Следующая публикация через {next_interval} минут (случайный интервал)")
             return True
         else:
             logger.error("❌ Не удалось опубликовать в Telegram, возвращаем в очередь")
+            # Возвращаем в очередь (в начало)
             self.state["queue"].insert(0, article)
             self.save_state()
             return False
     
     def check_and_publish(self):
         """Основной метод: проверяет новые статьи и публикует со случайным интервалом"""
+        # Сначала проверяем новые статьи
         self.check_new_articles()
         
+        # Проверяем, можно ли публиковать сейчас
         if self.state.get("last_publish"):
             last_pub = datetime.fromisoformat(self.state["last_publish"])
+            
+            # Случайный интервал от 35 до 120 минут
             random_interval = random.randint(35, 120)
             next_pub = last_pub + timedelta(minutes=random_interval)
             now = datetime.now()
@@ -702,6 +815,7 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
                 logger.info(f"⏳ Случайный интервал: следующий пост через {wait_minutes} минут")
                 return
         
+        # Пробуем опубликовать
         if self.state["queue"]:
             self.publish_next()
         else:
@@ -709,8 +823,10 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
     
     def run_continuously(self):
         """Запускает бесконечный цикл с проверкой каждые CHECK_INTERVAL минут"""
+        # Немедленная проверка при старте
         self.check_and_publish()
         
+        # Планируем регулярные проверки
         self.scheduler.add_job(
             func=self.check_and_publish,
             trigger=IntervalTrigger(minutes=CHECK_INTERVAL),
@@ -723,6 +839,7 @@ logger.info(f"✅ Текст извлечён: {len(text)} символов, {pa
         logger.info(f"⏰ Планировщик запущен, следующая проверка через {CHECK_INTERVAL} минут")
         
         try:
+            # Держим процесс живым
             while True:
                 time.sleep(60)
         except KeyboardInterrupt:
