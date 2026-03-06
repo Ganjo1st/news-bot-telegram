@@ -12,6 +12,13 @@ import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+# ==================== ДИАГНОСТИКА ====================
+print("=== ДИАГНОСТИКА ПЕРЕМЕННЫХ ===")
+print(f"CHECK_INTERVAL из env: {os.getenv('CHECK_INTERVAL')}")
+print(f"PUBLISH_INTERVAL из env: {os.getenv('PUBLISH_INTERVAL')}")
+print("===============================")
+# ====================================================
+
 import requests
 from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -42,6 +49,10 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
 STATE_FILE = "bot_state.json"
 LOG_FILE = "bot.log"
 # ====================================================
+
+# Ещё одна диагностика после загрузки
+print(f"CHECK_INTERVAL после загрузки: {CHECK_INTERVAL} минут")
+print(f"Тип: {type(CHECK_INTERVAL)}")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -262,6 +273,7 @@ class NewsBot:
                         if src.startswith('http'):
                             image_url = src
                         elif src.startswith('/'):
+                            from urllib.parse import urlparse
                             parsed = urlparse(url)
                             image_url = f"{parsed.scheme}://{parsed.netloc}{src}"
                         break
@@ -345,8 +357,7 @@ class NewsBot:
             driver.get("https://www.9111.ru")
             time.sleep(3)
             
-            # Здесь код авторизации и публикации
-            # ... (ваш существующий код)
+            # Здесь код авторизации и публикации (ваш существующий код)
             
             logger.info("✅ Пост на 9111.ru опубликован")
             return True
@@ -489,6 +500,7 @@ class NewsBot:
             logger.info("📭 Очередь пуста, нечего публиковать")
 
     def run_continuously(self):
+        # Логируем реальное значение CHECK_INTERVAL
         logger.info("=" * 60)
         logger.info("🚀 БОТ ЗАПУЩЕН")
         logger.info(f"📊 В истории: {len(self.state.get('published_articles', {}))} статей")
