@@ -4,7 +4,7 @@ apscheduler==3.10.4
 pytz==2023.3
 selenium==4.18.1
 python-telegram-bot==20.7
-httpx==0.27.0
+httpx==0.25.2
 webdriver-manager==4.0.1
 lxml==5.1.0
 charset-normalizer==3.3.2
