@@ -12,9 +12,15 @@ RUN apt-get update && apt-get install -y \
     libnss3 \
     libatk-bridge2.0-0 \
     libgtk-3-0 \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update && apt-get install -y google-chrome-stable \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Добавляем репозиторий Google Chrome (новый способ без apt-key)
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+
+# Устанавливаем Chrome
+RUN apt-get update && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
 # Устанавливаем рабочую директорию
@@ -31,8 +37,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Проверяем установку Chrome
-RUN google-chrome --version && \
-    python -c "from webdriver_manager.chrome import ChromeDriverManager; ChromeDriverManager().install()"
+RUN google-chrome --version
 
 # Команда для запуска
 CMD ["python", "bot.py"]
