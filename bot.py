@@ -31,8 +31,8 @@ from telegram.error import TelegramError
 import httpx
 
 # ==================== НАСТРОЙКИ ====================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("CHANNEL_ID") or os.getenv("TELEGRAM_CHANNEL_ID")
 
 NINTH_EMAIL = os.getenv("NINTH_EMAIL", "")
 NINTH_PASSWORD = os.getenv("NINTH_PASSWORD", "")
