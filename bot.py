@@ -135,9 +135,20 @@ class NewsBot:
             logger.error(f"❌ Ошибка сохранения: {e}")
     
     def generate_content_hash(self, title: str, text: str = "") -> str:
-        """Универсальный хэш для дедупликации"""
-        content = f"{re.sub(r'[^\w\s]', '', title.lower())}|{text[:500].lower()}"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        """Универсальный хэш для дедупликации (ИСПРАВЛЕНО: без обратной косой черты в f-string)"""
+        # Очищаем заголовок от спецсимволов
+        title_clean = re.sub(r'[^\w\s]', '', title.lower())
+        title_clean = re.sub(r'\s+', ' ', title_clean).strip()
+        
+        # Берём начало текста
+        text_sample = text[:500].lower()
+        text_clean = re.sub(r'[^\w\s]', '', text_sample)
+        text_clean = re.sub(r'\s+', ' ', text_clean).strip()
+        
+        # Создаём строку для хэширования
+        content = f"{title_clean}|{text_clean}"
+        
+        return hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
     
     def is_duplicate(self, content_hash: str, url: str = None) -> bool:
         """Проверка дубликата по хэшу и URL"""
