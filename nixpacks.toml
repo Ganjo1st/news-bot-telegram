@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ['python311', 'chromium', 'chromedriver', 'chromium-headless', 'openssl']
+nixPkgs = ['python311', 'chromium', 'chromedriver', 'chromium-headless']
 
 [phases.install]
 cmds = ['pip install -r requirements.txt']
