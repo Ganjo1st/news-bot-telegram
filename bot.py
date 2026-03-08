@@ -1,12 +1,12 @@
 """
-🤖 Telegram News Bot - Версия 11.1
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + ПУБЛИКАЦИЯ НА 9111.RU (ИСПРАВЛЕНО)
-- Проверка по хешу содержимого
-- Проверка по нормализованному заголовку
-- Проверка по URL
+🤖 Telegram News Bot - Версия 11.2
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (4 УРОВНЯ)
+- Уровень 1: Проверка по URL
+- Уровень 2: Проверка по нормализованному заголовку
+- Уровень 3: Проверка по хешу содержимого
+- Уровень 4: Проверка по первому предложению (НОВОЕ!)
 - Автопостинг в Telegram
-- Кросспостинг на 9111.ru через Selenium (работает!)
-- Детальное логирование
+- Кросспостинг на 9111.ru
 """
 
 import os
@@ -97,6 +97,7 @@ ALL_FEEDS = [
 SENT_LINKS_FILE = 'sent_links.json'
 SENT_HASHES_FILE = 'sent_hashes.json'
 SENT_TITLES_FILE = 'sent_titles.json'
+SENT_FIRST_SENTENCES_FILE = 'sent_first_sentences.json'  # НОВЫЙ ФАЙЛ
 POSTS_LOG_FILE = 'posts_log.json'
 TELEGRAM_MAX_CAPTION = 1024
 
@@ -106,7 +107,7 @@ TELEGRAM_MAX_CAPTION = 1024
 class NewsBot:
     def __init__(self):
         # Создаем файлы если их нет
-        for file in [SENT_LINKS_FILE, SENT_HASHES_FILE, SENT_TITLES_FILE, POSTS_LOG_FILE]:
+        for file in [SENT_LINKS_FILE, SENT_HASHES_FILE, SENT_TITLES_FILE, SENT_FIRST_SENTENCES_FILE, POSTS_LOG_FILE]:
             if not os.path.exists(file):
                 with open(file, 'w', encoding='utf-8') as f:
                     json.dump([], f)
@@ -116,10 +117,11 @@ class NewsBot:
         self.translator = GoogleTranslator(source='en', target='ru')
         self.scheduler = AsyncIOScheduler()
         
-        # Загружаем все три базы данных
+        # Загружаем все четыре базы данных
         self.sent_links = self.load_set(SENT_LINKS_FILE)
         self.sent_hashes = self.load_set(SENT_HASHES_FILE)
         self.sent_titles = self.load_set(SENT_TITLES_FILE)
+        self.sent_first_sentences = self.load_set(SENT_FIRST_SENTENCES_FILE)  # НОВОЕ
         self.posts_log = self.load_json(POSTS_LOG_FILE)
         
         self.session = None
@@ -132,6 +134,7 @@ class NewsBot:
         logger.info(f"📊 Загружено {len(self.sent_links)} ссылок")
         logger.info(f"📊 Загружено {len(self.sent_hashes)} хешей содержимого")
         logger.info(f"📊 Загружено {len(self.sent_titles)} заголовков")
+        logger.info(f"📊 Загружено {len(self.sent_first_sentences)} первых предложений")
         logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе")
         logger.info(f"🌐 Chrome для 9111.ru: {'✅ найден' if self.chrome_path else '❌ не найден'}")
 
@@ -231,12 +234,34 @@ class NewsBot:
         sample = content[:500].encode('utf-8')
         return hashlib.md5(sample).hexdigest()
 
+    def extract_first_sentence(self, content):
+        """
+        Извлекает первое предложение из текста
+        """
+        if not content:
+            return ""
+        
+        # Ищем конец первого предложения (. ! ?)
+        match = re.search(r'^.*?[.!?]', content)
+        if match:
+            first_sentence = match.group(0)
+        else:
+            # Если нет знаков препинания, берем первые 100 символов
+            first_sentence = content[:100]
+        
+        # Нормализуем: нижний регистр, убираем лишние пробелы
+        first_sentence = first_sentence.lower().strip()
+        first_sentence = re.sub(r'\s+', ' ', first_sentence)
+        
+        return first_sentence
+
     def is_duplicate(self, article_data):
         """
-        ТРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ:
+        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ:
         1. Проверка по URL (быстро)
         2. Проверка по нормализованному заголовку (средне)
         3. Проверка по хешу содержимого (надежно)
+        4. Проверка по первому предложению (самый надежный)
         """
         url = article_data.get('link', '')
         title = article_data.get('title', '')
@@ -260,10 +285,18 @@ class NewsBot:
                 logger.info(f"⏭️ ДУБЛИКАТ (содержимое): {title[:50]}...")
                 return True
         
+        # Уровень 4: Проверка по первому предложению (НОВОЕ)
+        if content:
+            first_sentence = self.extract_first_sentence(content)
+            if first_sentence and len(first_sentence) > 20:  # Игнорируем слишком короткие
+                if first_sentence in self.sent_first_sentences:
+                    logger.info(f"⏭️ ДУБЛИКАТ (первое предложение): {first_sentence[:50]}...")
+                    return True
+        
         return False
 
     def mark_as_sent(self, article_data):
-        """Помечает статью как отправленную во всех трёх базах"""
+        """Помечает статью как отправленную во всех четырёх базах"""
         url = article_data.get('link', '')
         title = article_data.get('title', '')
         content = article_data.get('content', '')
@@ -286,7 +319,14 @@ class NewsBot:
                 self.sent_hashes.add(content_hash)
                 self.save_set(SENT_HASHES_FILE, self.sent_hashes)
         
-        logger.info(f"✅ Статья помечена как отправленная (URL + заголовок + хеш)")
+        # Добавляем первое предложение (НОВОЕ)
+        if content:
+            first_sentence = self.extract_first_sentence(content)
+            if first_sentence and len(first_sentence) > 20:
+                self.sent_first_sentences.add(first_sentence)
+                self.save_set(SENT_FIRST_SENTENCES_FILE, self.sent_first_sentences)
+        
+        logger.info(f"✅ Статья помечена как отправленная (URL + заголовок + хеш + первое предложение)")
 
     # ========== УДАЛЕНИЕ МЕТА-ДАННЫХ ==========
     def remove_metadata(self, text):
@@ -694,7 +734,7 @@ class NewsBot:
                 )
 
                 if article_data:
-                    # ПОЛНАЯ ПРОВЕРКА на дубликат
+                    # ПОЛНАЯ ПРОВЕРКА на дубликат (4 уровня)
                     if self.is_duplicate({
                         'link': url,
                         'title': article_data['title'],
@@ -763,7 +803,7 @@ class NewsBot:
                 )
 
                 if article_data:
-                    # ПОЛНАЯ ПРОВЕРКА на дубликат
+                    # ПОЛНАЯ ПРОВЕРКА на дубликат (4 уровня)
                     if self.is_duplicate({
                         'link': link,
                         'title': article_data['title'],
@@ -929,11 +969,10 @@ class NewsBot:
 
         return current_text
 
-    # ========== ПУБЛИКАЦИЯ НА 9111.RU (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==========
+    # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
     def publish_to_9111(self, title, content, source_url):
         """
         Публикация статьи на 9111.ru через Selenium
-        Исправлено на основе HTML страницы /pubs/add/title/
         """
         if not self.chrome_path:
             logger.warning("⚠️ Chrome не найден, пропускаем 9111.ru")
@@ -990,10 +1029,6 @@ class NewsBot:
             logger.info("📝 Переход к созданию публикации...")
             driver.get("https://www.9111.ru/pubs/add/title/")
             time.sleep(3)
-            
-            # Сохраняем скриншот для отладки
-            driver.save_screenshot("debug_9111_page.png")
-            logger.info("📸 Скриншот страницы сохранён")
             
             # 3. Заполняем заголовок
             logger.info(f"📝 Заголовок: {title[:50]}...")
@@ -1074,39 +1109,13 @@ class NewsBot:
             page_source = driver.page_source
             if "Спасибо" in page_source or "опубликована" in page_source or "успешно" in page_source.lower():
                 logger.info(f"✅ Статья успешно опубликована на 9111.ru")
-                
-                # Сохраняем финальный скриншот
-                driver.save_screenshot("success_9111.png")
                 return True
             else:
                 logger.warning("⚠️ Результат публикации неясен, но ошибок нет")
-                driver.save_screenshot("unknown_result_9111.png")
                 return True
-            
-        except TimeoutException as e:
-            logger.error(f"❌ Таймаут при работе с 9111.ru: {e}")
-            if driver:
-                driver.save_screenshot("timeout_9111.png")
-            return False
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации на 9111.ru: {e}")
-            
-            # Сохраняем скриншот для отладки
-            try:
-                if driver:
-                    screenshot_path = f"error_9111_{int(time.time())}.png"
-                    driver.save_screenshot(screenshot_path)
-                    logger.info(f"📸 Скриншот ошибки сохранён: {screenshot_path}")
-                    
-                    # Сохраняем HTML страницы для анализа
-                    html_path = f"error_9111_{int(time.time())}.html"
-                    with open(html_path, 'w', encoding='utf-8') as f:
-                        f.write(driver.page_source)
-                    logger.info(f"📄 HTML страницы сохранён: {html_path}")
-            except:
-                pass
-            
             return False
         finally:
             if driver:
@@ -1176,7 +1185,7 @@ class NewsBot:
                 )
                 logger.info("✅ Пост в Telegram опубликован")
 
-            # Публикация на 9111.ru (в отдельном потоке, чтобы не блокировать)
+            # Публикация на 9111.ru
             if self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD:
                 loop = asyncio.get_event_loop()
                 success_9111 = await loop.run_in_executor(
@@ -1245,7 +1254,7 @@ class NewsBot:
         if post_data:
             success = await self.publish_post(post_data, item)
             if success:
-                # Помечаем статью как отправленную во всех трёх базах
+                # Помечаем статью как отправленную во всех четырёх базах
                 self.mark_as_sent(item)
                 self.log_post(item['link'], item['title'])
                 logger.info(f"✅ Статья опубликована и помечена во всех базах")
@@ -1264,16 +1273,17 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 11.1 - АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛЕЙ + 9111.RU (РАБОТАЕТ)")
+        logger.info("🚀 NEWS BOT 11.2 - 4 УРОВНЯ ЗАЩИТЫ ОТ ДУБЛЕЙ + 9111.RU")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
-        logger.info(f"🔒 Защита от дублей:")
+        logger.info(f"🔒 Защита от дублей (4 уровня):")
         logger.info(f"   - URL: {len(self.sent_links)} записей")
         logger.info(f"   - Заголовки: {len(self.sent_titles)} записей")
         logger.info(f"   - Хеши: {len(self.sent_hashes)} записей")
+        logger.info(f"   - Первые предложения: {len(self.sent_first_sentences)} записей")
         logger.info(f"🌐 9111.ru: {'✅ доступен' if self.chrome_path and NINTH_EMAIL else '❌ недоступен'}")
         logger.info("="*80)
 
