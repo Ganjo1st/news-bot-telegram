@@ -1,8 +1,8 @@
 """
-🤖 Telegram News Bot - Версия 11.4
+🤖 Telegram News Bot - Версия 11.5
 АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (4 УРОВНЯ) + 9111.RU
-- Исправлена проверка переменных для 9111.ru
-- Поддержка паролей для внешних приложений
+- Добавлена отладка переменных окружения
+- Поддержка различных имён переменных
 """
 
 import os
@@ -47,22 +47,22 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 
-# Данные для 9111.ru
-NINTH_EMAIL = os.getenv('NINTH_EMAIL', '')
-NINTH_PASSWORD = os.getenv('NINTH_PASSWORD', '')
+# Данные для 9111.ru - пробуем разные варианты имён
+NINTH_EMAIL = (os.getenv('NINTH_EMAIL') or 
+               os.getenv('EMAIL_9111') or 
+               os.getenv('EMAIL') or 
+               '')
+
+NINTH_PASSWORD = (os.getenv('NINTH_PASSWORD') or 
+                  os.getenv('EMAIL_PASSWORD') or 
+                  os.getenv('PASSWORD') or 
+                  '')
 
 # Проверка обязательных переменных
 if not TELEGRAM_TOKEN or not CHANNEL_ID:
     logger.error("❌ TELEGRAM_TOKEN или CHANNEL_ID не заданы!")
     logger.error("Проверьте переменные окружения в Railway")
     sys.exit(1)
-
-# Проверка данных для 9111.ru (только для информации)
-if NINTH_EMAIL and NINTH_PASSWORD:
-    logger.info(f"✅ Данные для 9111.ru загружены: {NINTH_EMAIL}")
-    logger.info(f"✅ Пароль для внешних приложений: {'*' * len(NINTH_PASSWORD)}")
-else:
-    logger.warning("⚠️ Данные для 9111.ru не найдены")
 
 # ХАОТИЧНЫЙ РЕЖИМ (в секундах)
 MIN_POST_INTERVAL = 35 * 60      # 35 минут
@@ -140,6 +140,9 @@ class NewsBot:
         # Проверяем наличие Chrome для 9111.ru
         self.chrome_path = self._find_chrome()
         
+        # Отладка переменных окружения
+        self._debug_env_vars()
+        
         # Проверяем наличие данных для 9111.ru
         self.ninth_available = bool(self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD)
         
@@ -152,6 +155,45 @@ class NewsBot:
         logger.info(f"📧 Email для 9111.ru: {'✅ задан' if NINTH_EMAIL else '❌ не задан'}")
         logger.info(f"🔑 Пароль для 9111.ru: {'✅ задан' if NINTH_PASSWORD else '❌ не задан'}")
         logger.info(f"🌐 9111.ru: {'✅ ДОСТУПЕН' if self.ninth_available else '❌ НЕДОСТУПЕН'}")
+
+    def _debug_env_vars(self):
+        """Отладка переменных окружения"""
+        logger.info("=" * 50)
+        logger.info("🔍 ОТЛАДКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ:")
+        
+        # Проверяем все возможные имена переменных
+        possible_emails = [
+            ('NINTH_EMAIL', os.getenv('NINTH_EMAIL')),
+            ('EMAIL_9111', os.getenv('EMAIL_9111')),
+            ('EMAIL', os.getenv('EMAIL')),
+            ('NINTH_EMAIL_9111', os.getenv('NINTH_EMAIL_9111'))
+        ]
+        
+        possible_passwords = [
+            ('NINTH_PASSWORD', os.getenv('NINTH_PASSWORD')),
+            ('EMAIL_PASSWORD', os.getenv('EMAIL_PASSWORD')),
+            ('PASSWORD', os.getenv('PASSWORD')),
+            ('NINTH_PASS', os.getenv('NINTH_PASS'))
+        ]
+        
+        for name, value in possible_emails:
+            if value:
+                logger.info(f"📧 Найден email в {name}: {value}")
+        
+        for name, value in possible_passwords:
+            if value:
+                logger.info(f"🔑 Найден пароль в {name}: {'*' * len(value)}")
+        
+        # Проверяем все переменные
+        logger.info("📋 Все переменные окружения (только relevant):")
+        for key, value in os.environ.items():
+            if any(x in key.upper() for x in ['EMAIL', 'PASS', 'NINTH', '9111', 'TOKEN', 'CHANNEL']):
+                if 'PASS' in key.upper() or 'TOKEN' in key.upper():
+                    logger.info(f"   {key}: {'*' * len(value)}")
+                else:
+                    logger.info(f"   {key}: {value}")
+        
+        logger.info("=" * 50)
 
     def _find_chrome(self) -> str:
         """Ищет Chrome в системе"""
@@ -1276,7 +1318,7 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 11.4 - 4 УРОВНЯ ЗАЩИТЫ + 9111.RU")
+        logger.info("🚀 NEWS BOT 11.5 - 4 УРОВНЯ ЗАЩИТЫ + 9111.RU")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
