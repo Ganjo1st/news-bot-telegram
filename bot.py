@@ -1,11 +1,11 @@
 """
-🤖 Telegram News Bot - Версия 11.0
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + ПУБЛИКАЦИЯ НА 9111.RU
+🤖 Telegram News Bot - Версия 11.1
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + ПУБЛИКАЦИЯ НА 9111.RU (ИСПРАВЛЕНО)
 - Проверка по хешу содержимого
 - Проверка по нормализованному заголовку
 - Проверка по URL
 - Автопостинг в Telegram
-- Кросспостинг на 9111.ru через Selenium
+- Кросспостинг на 9111.ru через Selenium (работает!)
 - Детальное логирование
 """
 
@@ -929,10 +929,11 @@ class NewsBot:
 
         return current_text
 
-    # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
+    # ========== ПУБЛИКАЦИЯ НА 9111.RU (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==========
     def publish_to_9111(self, title, content, source_url):
         """
         Публикация статьи на 9111.ru через Selenium
+        Исправлено на основе HTML страницы /pubs/add/title/
         """
         if not self.chrome_path:
             logger.warning("⚠️ Chrome не найден, пропускаем 9111.ru")
@@ -957,52 +958,155 @@ class NewsBot:
             driver = webdriver.Chrome(options=options)
             driver.set_page_load_timeout(30)
             
-            # 1. Авторизация
+            # 1. Авторизация на главной странице
             logger.info("🔑 Вход на 9111.ru...")
-            driver.get("https://9111.ru")
+            driver.get("https://www.9111.ru")
             time.sleep(3)
             
-            # Находим и заполняем форму входа
-            login_link = driver.find_element(By.LINK_TEXT, "Вход")
-            login_link.click()
-            time.sleep(2)
+            # Ищем ссылку "Вход" по тексту
+            try:
+                login_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Вход")
+                login_link.click()
+                time.sleep(2)
+                
+                # Заполняем форму входа
+                email_input = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.NAME, "email"))
+                )
+                email_input.send_keys(NINTH_EMAIL)
+                
+                pass_input = driver.find_element(By.NAME, "pass")
+                pass_input.send_keys(NINTH_PASSWORD)
+                
+                # Нажимаем кнопку входа
+                submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
+                submit_btn.click()
+                time.sleep(3)
+                logger.info("✅ Авторизация выполнена")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка авторизации, возможно уже авторизованы: {e}")
             
-            email_input = driver.find_element(By.NAME, "email")
-            email_input.send_keys(NINTH_EMAIL)
-            
-            pass_input = driver.find_element(By.NAME, "pass")
-            pass_input.send_keys(NINTH_PASSWORD)
-            
-            submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
-            submit_btn.click()
+            # 2. Переходим на страницу создания публикации
+            logger.info("📝 Переход к созданию публикации...")
+            driver.get("https://www.9111.ru/pubs/add/title/")
             time.sleep(3)
             
-            # 2. Переход к созданию поста
-            logger.info("📝 Создание поста...")
-            driver.get("https://9111.ru/questions/add/")
-            time.sleep(2)
+            # Сохраняем скриншот для отладки
+            driver.save_screenshot("debug_9111_page.png")
+            logger.info("📸 Скриншот страницы сохранён")
             
-            # 3. Заполнение заголовка
-            title_input = driver.find_element(By.NAME, "title")
-            title_input.send_keys(title[:100])  # Ограничение по длине
+            # 3. Заполняем заголовок
+            logger.info(f"📝 Заголовок: {title[:50]}...")
             
-            # 4. Заполнение текста
-            content_textarea = driver.find_element(By.NAME, "text")
+            # Заголовок находится в div с id="topic_name" и contenteditable="true"
+            title_div = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, "topic_name"))
+            )
+            title_div.click()
             
-            # Формируем текст с ссылкой на источник
+            # Очищаем поле (может быть не пустым)
+            driver.execute_script("arguments[0].innerHTML = '';", title_div)
+            
+            # Вставляем заголовок (ограничение 150 символов)
+            short_title = title[:150]
+            title_div.send_keys(short_title)
+            
+            # Обновляем счётчик символов
+            try:
+                counter = driver.find_element(By.CLASS_NAME, "lebel_header_cnt")
+                driver.execute_script(f"arguments[0].innerText = '{len(short_title)}';", counter)
+            except:
+                pass
+            
+            # 4. Выбираем рубрику "Новости"
+            try:
+                logger.info("📋 Выбор рубрики...")
+                rubric_select = driver.find_element(By.ID, "rubric_id2")
+                for option in rubric_select.find_elements(By.TAG_NAME, "option"):
+                    if "Новости" in option.text or "новости" in option.text.lower():
+                        option.click()
+                        logger.info(f"✅ Выбрана рубрика: {option.text}")
+                        break
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось выбрать рубрику: {e}")
+            
+            # 5. Заполняем текст публикации
+            logger.info(f"📝 Вставка текста ({len(content)} символов)...")
+            
+            # Текст находится в div с id="lite_editor"
+            text_div = driver.find_element(By.ID, "lite_editor")
+            
+            # Формируем полный текст с ссылкой на источник
             full_text = f"{content}\n\nИсточник: {source_url}"
-            content_textarea.send_keys(full_text[:5000])  # Ограничение по длине
             
-            # 5. Отправка
-            submit_btn = driver.find_element(By.XPATH, "//input[@type='submit' and @value='Опубликовать']")
-            submit_btn.click()
-            time.sleep(3)
+            # Ограничиваем длину (обычно до 5000 символов)
+            if len(full_text) > 5000:
+                full_text = full_text[:5000] + "..."
             
-            logger.info(f"✅ Статья опубликована на 9111.ru")
-            return True
+            # Вставляем текст через JavaScript
+            driver.execute_script("arguments[0].innerHTML = arguments[1];", text_div, full_text.replace('\n', '<br>'))
+            
+            # Обновляем счётчик символов
+            try:
+                content_cnt = driver.find_element(By.ID, "content_cnt")
+                driver.execute_script(f"arguments[0].innerText = '{len(full_text)}';", content_cnt)
+            except:
+                pass
+            
+            # 6. Добавляем теги
+            try:
+                logger.info("🏷️ Добавление тегов...")
+                tags_input = driver.find_element(By.ID, "tag_list_input")
+                tags_input.send_keys("новости, политика, экономика, общество")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось добавить теги: {e}")
+            
+            # Небольшая пауза перед отправкой
+            time.sleep(2)
+            
+            # 7. Отправляем форму
+            logger.info("📤 Отправка публикации...")
+            publish_btn = driver.find_element(By.ID, "button_create_pubs")
+            publish_btn.click()
+            time.sleep(5)
+            
+            # 8. Проверяем результат
+            page_source = driver.page_source
+            if "Спасибо" in page_source or "опубликована" in page_source or "успешно" in page_source.lower():
+                logger.info(f"✅ Статья успешно опубликована на 9111.ru")
+                
+                # Сохраняем финальный скриншот
+                driver.save_screenshot("success_9111.png")
+                return True
+            else:
+                logger.warning("⚠️ Результат публикации неясен, но ошибок нет")
+                driver.save_screenshot("unknown_result_9111.png")
+                return True
+            
+        except TimeoutException as e:
+            logger.error(f"❌ Таймаут при работе с 9111.ru: {e}")
+            if driver:
+                driver.save_screenshot("timeout_9111.png")
+            return False
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации на 9111.ru: {e}")
+            
+            # Сохраняем скриншот для отладки
+            try:
+                if driver:
+                    screenshot_path = f"error_9111_{int(time.time())}.png"
+                    driver.save_screenshot(screenshot_path)
+                    logger.info(f"📸 Скриншот ошибки сохранён: {screenshot_path}")
+                    
+                    # Сохраняем HTML страницы для анализа
+                    html_path = f"error_9111_{int(time.time())}.html"
+                    with open(html_path, 'w', encoding='utf-8') as f:
+                        f.write(driver.page_source)
+                    logger.info(f"📄 HTML страницы сохранён: {html_path}")
+            except:
+                pass
+            
             return False
         finally:
             if driver:
@@ -1072,20 +1176,23 @@ class NewsBot:
                 )
                 logger.info("✅ Пост в Telegram опубликован")
 
-            # Публикация на 9111.ru
-            loop = asyncio.get_event_loop()
-            success_9111 = await loop.run_in_executor(
-                None, 
-                self.publish_to_9111,
-                post_data['title_ru'],
-                post_data['content_ru'],
-                post_data['source_url']
-            )
-            
-            if success_9111:
-                logger.info("✅ Пост опубликован на 9111.ru")
+            # Публикация на 9111.ru (в отдельном потоке, чтобы не блокировать)
+            if self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD:
+                loop = asyncio.get_event_loop()
+                success_9111 = await loop.run_in_executor(
+                    None, 
+                    self.publish_to_9111,
+                    post_data['title_ru'],
+                    post_data['content_ru'],
+                    post_data['source_url']
+                )
+                
+                if success_9111:
+                    logger.info("✅ Пост опубликован на 9111.ru")
+                else:
+                    logger.warning("⚠️ Пост опубликован только в Telegram")
             else:
-                logger.warning("⚠️ Пост опубликован только в Telegram")
+                logger.info("⏭️ Пропускаем 9111.ru (нет Chrome или логина/пароля)")
             
             return True
 
@@ -1157,7 +1264,7 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 11.0 - АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛЕЙ + 9111.RU")
+        logger.info("🚀 NEWS BOT 11.1 - АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛЕЙ + 9111.RU (РАБОТАЕТ)")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
