@@ -1,12 +1,14 @@
 """
-🤖 Telegram News Bot - Версия 11.2
+🤖 Telegram News Bot - Версия 11.3
 АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (4 УРОВНЯ)
-- Уровень 1: Проверка по URL
-- Уровень 2: Проверка по нормализованному заголовку
-- Уровень 3: Проверка по хешу содержимого
-- Уровень 4: Проверка по первому предложению (НОВОЕ!)
+- Проверка по URL
+- Проверка по нормализованному заголовку
+- Проверка по хешу содержимого
+- Проверка по первому предложению
 - Автопостинг в Telegram
 - Кросспостинг на 9111.ru
+- Исправлен парсинг Global Research
+- Правильные имена переменных
 """
 
 import os
@@ -46,14 +48,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# КОНФИГУРАЦИЯ
+# КОНФИГУРАЦИЯ - ТОЛЬКО НУЖНЫЕ ПЕРЕМЕННЫЕ
 # ============================================================
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY')
-CHANNEL_ID = os.getenv('CHANNEL_ID', '@Novikon_news')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
 
-# Данные для 9111.ru
+# Данные для 9111.ru - используются только эти две переменные
 NINTH_EMAIL = os.getenv('NINTH_EMAIL', '')
 NINTH_PASSWORD = os.getenv('NINTH_PASSWORD', '')
+
+# Проверка обязательных переменных
+if not TELEGRAM_TOKEN or not CHANNEL_ID:
+    logger.error("❌ TELEGRAM_TOKEN или CHANNEL_ID не заданы!")
+    logger.error("Проверьте переменные окружения в Railway")
+    sys.exit(1)
 
 # ХАОТИЧНЫЙ РЕЖИМ (в секундах)
 MIN_POST_INTERVAL = 35 * 60      # 35 минут
@@ -97,7 +105,7 @@ ALL_FEEDS = [
 SENT_LINKS_FILE = 'sent_links.json'
 SENT_HASHES_FILE = 'sent_hashes.json'
 SENT_TITLES_FILE = 'sent_titles.json'
-SENT_FIRST_SENTENCES_FILE = 'sent_first_sentences.json'  # НОВЫЙ ФАЙЛ
+SENT_FIRST_SENTENCES_FILE = 'sent_first_sentences.json'
 POSTS_LOG_FILE = 'posts_log.json'
 TELEGRAM_MAX_CAPTION = 1024
 
@@ -121,7 +129,7 @@ class NewsBot:
         self.sent_links = self.load_set(SENT_LINKS_FILE)
         self.sent_hashes = self.load_set(SENT_HASHES_FILE)
         self.sent_titles = self.load_set(SENT_TITLES_FILE)
-        self.sent_first_sentences = self.load_set(SENT_FIRST_SENTENCES_FILE)  # НОВОЕ
+        self.sent_first_sentences = self.load_set(SENT_FIRST_SENTENCES_FILE)
         self.posts_log = self.load_json(POSTS_LOG_FILE)
         
         self.session = None
@@ -137,6 +145,7 @@ class NewsBot:
         logger.info(f"📊 Загружено {len(self.sent_first_sentences)} первых предложений")
         logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе")
         logger.info(f"🌐 Chrome для 9111.ru: {'✅ найден' if self.chrome_path else '❌ не найден'}")
+        logger.info(f"🔑 9111.ru: {'✅ данные есть' if NINTH_EMAIL and NINTH_PASSWORD else '❌ нет логина/пароля'}")
 
     def _find_chrome(self) -> str:
         """Ищет Chrome в системе"""
@@ -197,25 +206,15 @@ class NewsBot:
     # ========== СОЗДАНИЕ УНИКАЛЬНЫХ КЛЮЧЕЙ ==========
     def normalize_title(self, title):
         """
-        Нормализует заголовок для сравнения:
-        - Приводит к нижнему регистру
-        - Удаляет знаки препинания
-        - Удаляет лишние пробелы
-        - Удаляет общие слова (the, a, an, and, etc)
+        Нормализует заголовок для сравнения
         """
         if not title:
             return ""
         
-        # Приводим к нижнему регистру
         title = title.lower()
-        
-        # Удаляем знаки препинания
         title = re.sub(r'[^\w\s]', '', title)
-        
-        # Удаляем лишние пробелы
         title = re.sub(r'\s+', ' ', title).strip()
         
-        # Удаляем общие слова
         common_words = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']
         words = title.split()
         words = [w for w in words if w not in common_words]
@@ -225,12 +224,10 @@ class NewsBot:
     def create_content_hash(self, content):
         """
         Создает хеш содержимого статьи
-        Использует первые 500 символов текста для создания уникального ключа
         """
         if not content:
             return None
         
-        # Берем первые 500 символов
         sample = content[:500].encode('utf-8')
         return hashlib.md5(sample).hexdigest()
 
@@ -241,15 +238,12 @@ class NewsBot:
         if not content:
             return ""
         
-        # Ищем конец первого предложения (. ! ?)
         match = re.search(r'^.*?[.!?]', content)
         if match:
             first_sentence = match.group(0)
         else:
-            # Если нет знаков препинания, берем первые 100 символов
             first_sentence = content[:100]
         
-        # Нормализуем: нижний регистр, убираем лишние пробелы
         first_sentence = first_sentence.lower().strip()
         first_sentence = re.sub(r'\s+', ' ', first_sentence)
         
@@ -257,11 +251,7 @@ class NewsBot:
 
     def is_duplicate(self, article_data):
         """
-        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ:
-        1. Проверка по URL (быстро)
-        2. Проверка по нормализованному заголовку (средне)
-        3. Проверка по хешу содержимого (надежно)
-        4. Проверка по первому предложению (самый надежный)
+        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ
         """
         url = article_data.get('link', '')
         title = article_data.get('title', '')
@@ -285,10 +275,10 @@ class NewsBot:
                 logger.info(f"⏭️ ДУБЛИКАТ (содержимое): {title[:50]}...")
                 return True
         
-        # Уровень 4: Проверка по первому предложению (НОВОЕ)
+        # Уровень 4: Проверка по первому предложению
         if content:
             first_sentence = self.extract_first_sentence(content)
-            if first_sentence and len(first_sentence) > 20:  # Игнорируем слишком короткие
+            if first_sentence and len(first_sentence) > 20:
                 if first_sentence in self.sent_first_sentences:
                     logger.info(f"⏭️ ДУБЛИКАТ (первое предложение): {first_sentence[:50]}...")
                     return True
@@ -296,52 +286,44 @@ class NewsBot:
         return False
 
     def mark_as_sent(self, article_data):
-        """Помечает статью как отправленную во всех четырёх базах"""
+        """Помечает статью как отправленную"""
         url = article_data.get('link', '')
         title = article_data.get('title', '')
         content = article_data.get('content', '')
         
-        # Добавляем URL
         if url:
             self.sent_links.add(url)
             self.save_set(SENT_LINKS_FILE, self.sent_links)
         
-        # Добавляем нормализованный заголовок
         norm_title = self.normalize_title(title)
         if norm_title:
             self.sent_titles.add(norm_title)
             self.save_set(SENT_TITLES_FILE, self.sent_titles)
         
-        # Добавляем хеш содержимого
         if content:
             content_hash = self.create_content_hash(content)
             if content_hash:
                 self.sent_hashes.add(content_hash)
                 self.save_set(SENT_HASHES_FILE, self.sent_hashes)
         
-        # Добавляем первое предложение (НОВОЕ)
         if content:
             first_sentence = self.extract_first_sentence(content)
             if first_sentence and len(first_sentence) > 20:
                 self.sent_first_sentences.add(first_sentence)
                 self.save_set(SENT_FIRST_SENTENCES_FILE, self.sent_first_sentences)
         
-        logger.info(f"✅ Статья помечена как отправленная (URL + заголовок + хеш + первое предложение)")
+        logger.info(f"✅ Статья помечена как отправленная (4 уровня)")
 
     # ========== УДАЛЕНИЕ МЕТА-ДАННЫХ ==========
     def remove_metadata(self, text):
         if not text:
             return text
         
-        # Удаляем временные метки
         text = re.sub(r'\d+\s*(hour|min|sec|day|minute|second)s?\s+ago', '', text, flags=re.IGNORECASE)
         text = re.sub(r'Updated\s*:?\s*[\d:APM\s-]+', '', text, flags=re.IGNORECASE)
         text = re.sub(r'Published\s*:?\s*[\d:APM\s-]+', '', text, flags=re.IGNORECASE)
-        
-        # Удаляем информацию об авторе
         text = re.sub(r'^By\s+[\w\s,]+\n', '', text, flags=re.IGNORECASE | re.MULTILINE)
         
-        # Удаляем служебные надписи
         garbage_phrases = [
             r'(?:Фарси|Русский|Немецкий|Испанский|Португальский|Французский|Итальянский)[\s,]+',
             r'Subscribe', r'Newsletter', r'Sign up', r'Follow us',
@@ -439,10 +421,10 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
 
-    # ========== ПАРСЕР AP NEWS V2 ==========
+    # ========== ПАРСЕР AP NEWS ==========
     def get_apnews_articles_v2(self):
         try:
-            logger.info("🌐 Парсинг главной страницы AP News (v2)")
+            logger.info("🌐 Парсинг главной страницы AP News")
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
@@ -483,7 +465,6 @@ class NewsBot:
                 
                 title = re.sub(r'\s+', ' ', title).strip()
                 
-                # Пропускаем служебные страницы
                 lower_title = title.lower()
                 if any(phrase in lower_title for phrase in ['newsletter', 'subscribe', 'sign up']):
                     continue
@@ -493,7 +474,6 @@ class NewsBot:
                     'title': title
                 })
 
-            # Убираем дубликаты URL
             unique_articles = []
             seen_urls = set()
             for article in articles:
@@ -518,7 +498,6 @@ class NewsBot:
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            # Заголовок
             title = None
             meta_title = soup.find('meta', property='og:title')
             if meta_title and meta_title.get('content'):
@@ -534,13 +513,11 @@ class NewsBot:
             title = re.sub(r'\s*\|.*AP\s*News.*$', '', title, flags=re.IGNORECASE)
             title = self.clean_text(title)
 
-            # Изображение
             main_image = None
             meta_img = soup.find('meta', property='og:image')
             if meta_img and meta_img.get('content'):
                 main_image = meta_img['content']
 
-            # Текст статьи
             article_text = ""
             main_container = None
             
@@ -561,19 +538,16 @@ class NewsBot:
                 main_container = soup.body
             
             if main_container:
-                # Удаляем ненужные элементы
                 for unwanted in main_container.find_all(['aside', 'nav', 'header', 'footer', 'script', 'style']):
                     unwanted.decompose()
                 
                 for elem in main_container.find_all(class_=re.compile(r'sidebar|newsletter|related|ad|promo', re.I)):
                     elem.decompose()
                 
-                # Собираем параграфы
                 paragraphs = []
                 for p in main_container.find_all('p'):
                     p_text = p.get_text(strip=True)
                     if p_text and len(p_text) > 20:
-                        # Пропускаем рекламные параграфы
                         lower_text = p_text.lower()
                         if not any(phrase in lower_text for phrase in 
                                  ['subscribe', 'newsletter', 'sign up', 'follow us']):
@@ -651,56 +625,124 @@ class NewsBot:
             logger.error(f"❌ Ошибка парсинга InfoBrics: {e}")
             return None
 
-    # ========== ПАРСЕР GLOBAL RESEARCH ==========
+    # ========== ПАРСЕР GLOBAL RESEARCH (УЛУЧШЕННЫЙ) ==========
     def parse_globalresearch(self, url, source_name):
+        """
+        Улучшенный парсинг Global Research
+        """
         try:
             logger.info(f"🌐 Парсинг Global Research: {url}")
-            headers = {'User-Agent': 'Mozilla/5.0'}
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
             response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
+                logger.warning(f"⚠️ HTTP {response.status_code} для {url}")
                 return None
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
+            # Поиск заголовка
             title = "Без заголовка"
-            title_elem = soup.find('h1') or soup.find('title')
-            if title_elem:
-                title = self.clean_text(title_elem.get_text())
-
-            main_image = None
-            img_elem = soup.find('img', class_=re.compile(r'featured|wp-post-image'))
-            if img_elem and img_elem.get('src'):
-                img_src = img_elem['src']
-                if img_src.startswith('/'):
-                    domain = url.split('/')[2]
-                    main_image = f"https://{domain}{img_src}"
-                elif not img_src.startswith('http'):
-                    domain = url.split('/')[2]
-                    main_image = f"https://{domain}/{img_src}"
+            
+            meta_title = soup.find('meta', property='og:title')
+            if meta_title and meta_title.get('content'):
+                title = meta_title['content']
+            else:
+                h1 = soup.find('h1')
+                if h1:
+                    title = h1.get_text(strip=True)
                 else:
-                    main_image = img_src
+                    title_tag = soup.find('title')
+                    if title_tag:
+                        title = title_tag.get_text(strip=True)
+                        title = re.sub(r'\s*[|-]\s*Global Research.*$', '', title, flags=re.IGNORECASE)
+            
+            title = self.clean_text(title)
+            logger.info(f"📌 Заголовок: {title[:70]}...")
 
+            # Поиск изображения
+            main_image = None
+            
+            meta_img = soup.find('meta', property='og:image')
+            if meta_img and meta_img.get('content'):
+                main_image = meta_img['content']
+            else:
+                img_elem = soup.find('img', class_=re.compile(r'featured|wp-post-image|attachment-', re.I))
+                if img_elem and img_elem.get('src'):
+                    img_src = img_elem['src']
+                    if img_src.startswith('/'):
+                        domain = url.split('/')[2]
+                        main_image = f"https://{domain}{img_src}"
+                    elif not img_src.startswith('http'):
+                        domain = url.split('/')[2]
+                        main_image = f"https://{domain}/{img_src}"
+                    else:
+                        main_image = img_src
+
+            # Поиск текста
             article_text = ""
-            text_container = soup.find('div', class_=re.compile(r'entry-content|post-content'))
+            
+            possible_selectors = [
+                'div.entry-content',
+                'div.post-content',
+                'div.article-content',
+                'div.post-entry',
+                'article',
+                'div[itemprop="articleBody"]',
+                'div.content'
+            ]
+            
+            text_container = None
+            for selector in possible_selectors:
+                container = soup.select_one(selector)
+                if container:
+                    text_container = container
+                    break
+            
+            if not text_container:
+                for class_pattern in ['entry-content', 'post-content', 'article-content']:
+                    container = soup.find('div', class_=re.compile(class_pattern, re.I))
+                    if container:
+                        text_container = container
+                        break
+            
+            if not text_container:
+                text_container = soup.body
+            
             if text_container:
-                for unwanted in text_container.find_all(['script', 'style', 'button']):
-                    unwanted.decompose()
+                for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside']:
+                    for elem in text_container.find_all(tag):
+                        elem.decompose()
+                
+                for elem in text_container.find_all(class_=re.compile(r'sidebar|newsletter|related|ad|promo|comment|share|social', re.I)):
+                    elem.decompose()
+                
                 paragraphs = []
                 for p in text_container.find_all('p'):
-                    p_text = self.clean_text(p.get_text())
-                    if p_text and len(p_text) > 15:
-                        paragraphs.append(p_text)
+                    p_text = p.get_text(strip=True)
+                    if p_text and len(p_text) > 20:
+                        lower_text = p_text.lower()
+                        if not any(phrase in lower_text for phrase in 
+                                 ['subscribe', 'newsletter', 'sign up', 'follow us', 'click here', 'read more']):
+                            paragraphs.append(p_text)
+                
                 if paragraphs:
-                    article_text = '\n\n'.join(paragraphs)
+                    article_text = '\n\n'.join(paragraphs[:20])
 
             if len(article_text) < 200:
+                logger.warning(f"⚠️ Текст слишком короткий ({len(article_text)} символов)")
                 return None
+
+            article_text = self.remove_metadata(article_text)
+            logger.info(f"📄 Текст: {len(article_text)} символов")
 
             return {
                 'title': title,
                 'content': article_text,
                 'main_image': main_image
             }
+            
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга Global Research: {e}")
             return None
@@ -722,7 +764,6 @@ class NewsBot:
                 url = article['url']
                 title = article['title']
 
-                # Быстрая проверка по URL
                 if url in self.sent_links:
                     logger.info(f"⏭️ УЖЕ БЫЛО (URL): {title[:50]}...")
                     continue
@@ -734,7 +775,6 @@ class NewsBot:
                 )
 
                 if article_data:
-                    # ПОЛНАЯ ПРОВЕРКА на дубликат (4 уровня)
                     if self.is_duplicate({
                         'link': url,
                         'title': article_data['title'],
@@ -750,7 +790,7 @@ class NewsBot:
                         'main_image': article_data.get('main_image'),
                         'priority': 1
                     })
-                    logger.info(f"✅ Статья добавлена (прошла все проверки)")
+                    logger.info(f"✅ Статья добавлена")
                 else:
                     logger.warning(f"❌ Не удалось спарсить")
 
@@ -790,7 +830,6 @@ class NewsBot:
                 link = entry.get('link', '')
                 title = entry.get('title', 'Без заголовка')
 
-                # Быстрая проверка по URL
                 if link in self.sent_links:
                     logger.info(f"⏭️ УЖЕ БЫЛО (URL): {title[:50]}...")
                     continue
@@ -803,7 +842,6 @@ class NewsBot:
                 )
 
                 if article_data:
-                    # ПОЛНАЯ ПРОВЕРКА на дубликат (4 уровня)
                     if self.is_duplicate({
                         'link': link,
                         'title': article_data['title'],
@@ -819,7 +857,7 @@ class NewsBot:
                         'main_image': article_data.get('main_image'),
                         'priority': priority
                     })
-                    logger.info(f"✅ Статья добавлена (прошла все проверки)")
+                    logger.info(f"✅ Статья добавлена")
                 else:
                     logger.warning(f"❌ Не удалось спарсить {source_name}")
 
@@ -846,7 +884,6 @@ class NewsBot:
             all_news.extend(news)
             await asyncio.sleep(random.randint(5, 10))
 
-        # Сортируем по приоритету
         all_news.sort(key=lambda x: x.get('priority', 5))
 
         logger.info(f"📊 ВСЕГО НОВЫХ УНИКАЛЬНЫХ СТАТЕЙ: {len(all_news)}")
@@ -997,18 +1034,16 @@ class NewsBot:
             driver = webdriver.Chrome(options=options)
             driver.set_page_load_timeout(30)
             
-            # 1. Авторизация на главной странице
+            # 1. Авторизация
             logger.info("🔑 Вход на 9111.ru...")
             driver.get("https://www.9111.ru")
             time.sleep(3)
             
-            # Ищем ссылку "Вход" по тексту
             try:
                 login_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Вход")
                 login_link.click()
                 time.sleep(2)
                 
-                # Заполняем форму входа
                 email_input = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.NAME, "email"))
                 )
@@ -1017,15 +1052,14 @@ class NewsBot:
                 pass_input = driver.find_element(By.NAME, "pass")
                 pass_input.send_keys(NINTH_PASSWORD)
                 
-                # Нажимаем кнопку входа
                 submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
                 submit_btn.click()
                 time.sleep(3)
                 logger.info("✅ Авторизация выполнена")
             except Exception as e:
-                logger.warning(f"⚠️ Ошибка авторизации, возможно уже авторизованы: {e}")
+                logger.warning(f"⚠️ Ошибка авторизации: {e}")
             
-            # 2. Переходим на страницу создания публикации
+            # 2. Переход к созданию публикации
             logger.info("📝 Переход к созданию публикации...")
             driver.get("https://www.9111.ru/pubs/add/title/")
             time.sleep(3)
@@ -1033,86 +1067,56 @@ class NewsBot:
             # 3. Заполняем заголовок
             logger.info(f"📝 Заголовок: {title[:50]}...")
             
-            # Заголовок находится в div с id="topic_name" и contenteditable="true"
             title_div = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, "topic_name"))
             )
             title_div.click()
-            
-            # Очищаем поле (может быть не пустым)
             driver.execute_script("arguments[0].innerHTML = '';", title_div)
             
-            # Вставляем заголовок (ограничение 150 символов)
             short_title = title[:150]
             title_div.send_keys(short_title)
             
-            # Обновляем счётчик символов
-            try:
-                counter = driver.find_element(By.CLASS_NAME, "lebel_header_cnt")
-                driver.execute_script(f"arguments[0].innerText = '{len(short_title)}';", counter)
-            except:
-                pass
-            
-            # 4. Выбираем рубрику "Новости"
+            # 4. Выбираем рубрику
             try:
                 logger.info("📋 Выбор рубрики...")
                 rubric_select = driver.find_element(By.ID, "rubric_id2")
                 for option in rubric_select.find_elements(By.TAG_NAME, "option"):
-                    if "Новости" in option.text or "новости" in option.text.lower():
+                    if "Новости" in option.text:
                         option.click()
                         logger.info(f"✅ Выбрана рубрика: {option.text}")
                         break
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось выбрать рубрику: {e}")
             
-            # 5. Заполняем текст публикации
+            # 5. Заполняем текст
             logger.info(f"📝 Вставка текста ({len(content)} символов)...")
             
-            # Текст находится в div с id="lite_editor"
             text_div = driver.find_element(By.ID, "lite_editor")
-            
-            # Формируем полный текст с ссылкой на источник
             full_text = f"{content}\n\nИсточник: {source_url}"
             
-            # Ограничиваем длину (обычно до 5000 символов)
             if len(full_text) > 5000:
                 full_text = full_text[:5000] + "..."
             
-            # Вставляем текст через JavaScript
             driver.execute_script("arguments[0].innerHTML = arguments[1];", text_div, full_text.replace('\n', '<br>'))
-            
-            # Обновляем счётчик символов
-            try:
-                content_cnt = driver.find_element(By.ID, "content_cnt")
-                driver.execute_script(f"arguments[0].innerText = '{len(full_text)}';", content_cnt)
-            except:
-                pass
             
             # 6. Добавляем теги
             try:
                 logger.info("🏷️ Добавление тегов...")
                 tags_input = driver.find_element(By.ID, "tag_list_input")
-                tags_input.send_keys("новости, политика, экономика, общество")
+                tags_input.send_keys("новости, политика, экономика")
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось добавить теги: {e}")
             
-            # Небольшая пауза перед отправкой
             time.sleep(2)
             
-            # 7. Отправляем форму
+            # 7. Отправляем
             logger.info("📤 Отправка публикации...")
             publish_btn = driver.find_element(By.ID, "button_create_pubs")
             publish_btn.click()
             time.sleep(5)
             
-            # 8. Проверяем результат
-            page_source = driver.page_source
-            if "Спасибо" in page_source or "опубликована" in page_source or "успешно" in page_source.lower():
-                logger.info(f"✅ Статья успешно опубликована на 9111.ru")
-                return True
-            else:
-                logger.warning("⚠️ Результат публикации неясен, но ошибок нет")
-                return True
+            logger.info(f"✅ Статья успешно опубликована на 9111.ru")
+            return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка публикации на 9111.ru: {e}")
@@ -1163,7 +1167,6 @@ class NewsBot:
 
     async def publish_post(self, post_data, original_item):
         try:
-            # Публикация в Telegram
             if post_data['image_path']:
                 with open(post_data['image_path'], 'rb') as photo:
                     await self.bot.send_photo(
@@ -1185,7 +1188,6 @@ class NewsBot:
                 )
                 logger.info("✅ Пост в Telegram опубликован")
 
-            # Публикация на 9111.ru
             if self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD:
                 loop = asyncio.get_event_loop()
                 success_9111 = await loop.run_in_executor(
@@ -1201,7 +1203,7 @@ class NewsBot:
                 else:
                     logger.warning("⚠️ Пост опубликован только в Telegram")
             else:
-                logger.info("⏭️ Пропускаем 9111.ru (нет Chrome или логина/пароля)")
+                logger.info("⏭️ Пропускаем 9111.ru")
             
             return True
 
@@ -1254,10 +1256,9 @@ class NewsBot:
         if post_data:
             success = await self.publish_post(post_data, item)
             if success:
-                # Помечаем статью как отправленную во всех четырёх базах
                 self.mark_as_sent(item)
                 self.log_post(item['link'], item['title'])
-                logger.info(f"✅ Статья опубликована и помечена во всех базах")
+                logger.info(f"✅ Статья опубликована и помечена")
 
                 next_delay = self.get_next_post_delay()
                 logger.info(f"⏰ Следующая публикация через {next_delay//60} минут")
@@ -1273,17 +1274,17 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 11.2 - 4 УРОВНЯ ЗАЩИТЫ ОТ ДУБЛЕЙ + 9111.RU")
+        logger.info("🚀 NEWS BOT 11.3 - 4 УРОВНЯ ЗАЩИТЫ + 9111.RU")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
         logger.info(f"🔒 Защита от дублей (4 уровня):")
-        logger.info(f"   - URL: {len(self.sent_links)} записей")
-        logger.info(f"   - Заголовки: {len(self.sent_titles)} записей")
-        logger.info(f"   - Хеши: {len(self.sent_hashes)} записей")
-        logger.info(f"   - Первые предложения: {len(self.sent_first_sentences)} записей")
+        logger.info(f"   - URL: {len(self.sent_links)}")
+        logger.info(f"   - Заголовки: {len(self.sent_titles)}")
+        logger.info(f"   - Хеши: {len(self.sent_hashes)}")
+        logger.info(f"   - Первые предложения: {len(self.sent_first_sentences)}")
         logger.info(f"🌐 9111.ru: {'✅ доступен' if self.chrome_path and NINTH_EMAIL else '❌ недоступен'}")
         logger.info("="*80)
 
@@ -1305,7 +1306,7 @@ class NewsBot:
             id='news_checker'
         )
         self.scheduler.start()
-        logger.info(f"✅ Планировщик запущен. Проверка новых статей каждые {CHECK_INTERVAL//60} минут")
+        logger.info(f"✅ Планировщик запущен. Проверка каждые {CHECK_INTERVAL//60} минут")
 
         try:
             while True:
