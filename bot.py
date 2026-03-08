@@ -1,14 +1,8 @@
 """
-🤖 Telegram News Bot - Версия 11.3
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (4 УРОВНЯ)
-- Проверка по URL
-- Проверка по нормализованному заголовку
-- Проверка по хешу содержимого
-- Проверка по первому предложению
-- Автопостинг в Telegram
-- Кросспостинг на 9111.ru
-- Исправлен парсинг Global Research
-- Правильные имена переменных
+🤖 Telegram News Bot - Версия 11.4
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (4 УРОВНЯ) + 9111.RU
+- Исправлена проверка переменных для 9111.ru
+- Поддержка паролей для внешних приложений
 """
 
 import os
@@ -48,12 +42,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# КОНФИГУРАЦИЯ - ТОЛЬКО НУЖНЫЕ ПЕРЕМЕННЫЕ
+# КОНФИГУРАЦИЯ
 # ============================================================
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 
-# Данные для 9111.ru - используются только эти две переменные
+# Данные для 9111.ru
 NINTH_EMAIL = os.getenv('NINTH_EMAIL', '')
 NINTH_PASSWORD = os.getenv('NINTH_PASSWORD', '')
 
@@ -62,6 +56,13 @@ if not TELEGRAM_TOKEN or not CHANNEL_ID:
     logger.error("❌ TELEGRAM_TOKEN или CHANNEL_ID не заданы!")
     logger.error("Проверьте переменные окружения в Railway")
     sys.exit(1)
+
+# Проверка данных для 9111.ru (только для информации)
+if NINTH_EMAIL and NINTH_PASSWORD:
+    logger.info(f"✅ Данные для 9111.ru загружены: {NINTH_EMAIL}")
+    logger.info(f"✅ Пароль для внешних приложений: {'*' * len(NINTH_PASSWORD)}")
+else:
+    logger.warning("⚠️ Данные для 9111.ru не найдены")
 
 # ХАОТИЧНЫЙ РЕЖИМ (в секундах)
 MIN_POST_INTERVAL = 35 * 60      # 35 минут
@@ -139,13 +140,18 @@ class NewsBot:
         # Проверяем наличие Chrome для 9111.ru
         self.chrome_path = self._find_chrome()
         
+        # Проверяем наличие данных для 9111.ru
+        self.ninth_available = bool(self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD)
+        
         logger.info(f"📊 Загружено {len(self.sent_links)} ссылок")
         logger.info(f"📊 Загружено {len(self.sent_hashes)} хешей содержимого")
         logger.info(f"📊 Загружено {len(self.sent_titles)} заголовков")
         logger.info(f"📊 Загружено {len(self.sent_first_sentences)} первых предложений")
         logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе")
         logger.info(f"🌐 Chrome для 9111.ru: {'✅ найден' if self.chrome_path else '❌ не найден'}")
-        logger.info(f"🔑 9111.ru: {'✅ данные есть' if NINTH_EMAIL and NINTH_PASSWORD else '❌ нет логина/пароля'}")
+        logger.info(f"📧 Email для 9111.ru: {'✅ задан' if NINTH_EMAIL else '❌ не задан'}")
+        logger.info(f"🔑 Пароль для 9111.ru: {'✅ задан' if NINTH_PASSWORD else '❌ не задан'}")
+        logger.info(f"🌐 9111.ru: {'✅ ДОСТУПЕН' if self.ninth_available else '❌ НЕДОСТУПЕН'}")
 
     def _find_chrome(self) -> str:
         """Ищет Chrome в системе"""
@@ -205,9 +211,7 @@ class NewsBot:
 
     # ========== СОЗДАНИЕ УНИКАЛЬНЫХ КЛЮЧЕЙ ==========
     def normalize_title(self, title):
-        """
-        Нормализует заголовок для сравнения
-        """
+        """Нормализует заголовок для сравнения"""
         if not title:
             return ""
         
@@ -222,9 +226,7 @@ class NewsBot:
         return ' '.join(words)[:100]
 
     def create_content_hash(self, content):
-        """
-        Создает хеш содержимого статьи
-        """
+        """Создает хеш содержимого статьи"""
         if not content:
             return None
         
@@ -232,9 +234,7 @@ class NewsBot:
         return hashlib.md5(sample).hexdigest()
 
     def extract_first_sentence(self, content):
-        """
-        Извлекает первое предложение из текста
-        """
+        """Извлекает первое предложение из текста"""
         if not content:
             return ""
         
@@ -250,32 +250,26 @@ class NewsBot:
         return first_sentence
 
     def is_duplicate(self, article_data):
-        """
-        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ
-        """
+        """ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ"""
         url = article_data.get('link', '')
         title = article_data.get('title', '')
         content = article_data.get('content', '')
         
-        # Уровень 1: Проверка по URL
         if url in self.sent_links:
             logger.info(f"⏭️ ДУБЛИКАТ (URL): {title[:50]}...")
             return True
         
-        # Уровень 2: Проверка по нормализованному заголовку
         norm_title = self.normalize_title(title)
         if norm_title and norm_title in self.sent_titles:
             logger.info(f"⏭️ ДУБЛИКАТ (заголовок): {title[:50]}...")
             return True
         
-        # Уровень 3: Проверка по хешу содержимого
         if content:
             content_hash = self.create_content_hash(content)
             if content_hash and content_hash in self.sent_hashes:
                 logger.info(f"⏭️ ДУБЛИКАТ (содержимое): {title[:50]}...")
                 return True
         
-        # Уровень 4: Проверка по первому предложению
         if content:
             first_sentence = self.extract_first_sentence(content)
             if first_sentence and len(first_sentence) > 20:
@@ -312,7 +306,7 @@ class NewsBot:
                 self.sent_first_sentences.add(first_sentence)
                 self.save_set(SENT_FIRST_SENTENCES_FILE, self.sent_first_sentences)
         
-        logger.info(f"✅ Статья помечена как отправленная (4 уровня)")
+        logger.info(f"✅ Статья помечена как отправленная")
 
     # ========== УДАЛЕНИЕ МЕТА-ДАННЫХ ==========
     def remove_metadata(self, text):
@@ -1011,17 +1005,14 @@ class NewsBot:
         """
         Публикация статьи на 9111.ru через Selenium
         """
-        if not self.chrome_path:
-            logger.warning("⚠️ Chrome не найден, пропускаем 9111.ru")
-            return False
-        
-        if not NINTH_EMAIL or not NINTH_PASSWORD:
-            logger.warning("⚠️ Не заданы логин/пароль для 9111.ru")
+        if not self.ninth_available:
+            logger.warning("⚠️ 9111.ru недоступен (нет Chrome или данных для входа)")
             return False
         
         driver = None
         try:
             logger.info("🌐 Запуск Selenium для 9111.ru...")
+            logger.info(f"📧 Используем email: {NINTH_EMAIL}")
             
             options = Options()
             options.add_argument("--headless=new")
@@ -1040,29 +1031,40 @@ class NewsBot:
             time.sleep(3)
             
             try:
-                login_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Вход")
-                login_link.click()
-                time.sleep(2)
-                
-                email_input = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.NAME, "email"))
-                )
-                email_input.send_keys(NINTH_EMAIL)
-                
-                pass_input = driver.find_element(By.NAME, "pass")
-                pass_input.send_keys(NINTH_PASSWORD)
-                
-                submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
-                submit_btn.click()
-                time.sleep(3)
-                logger.info("✅ Авторизация выполнена")
+                # Ищем ссылку "Вход"
+                login_links = driver.find_elements(By.PARTIAL_LINK_TEXT, "Вход")
+                if login_links:
+                    login_links[0].click()
+                    time.sleep(2)
+                    
+                    # Заполняем форму входа
+                    email_input = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.NAME, "email"))
+                    )
+                    email_input.send_keys(NINTH_EMAIL)
+                    
+                    pass_input = driver.find_element(By.NAME, "pass")
+                    pass_input.send_keys(NINTH_PASSWORD)
+                    
+                    # Нажимаем кнопку входа
+                    submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
+                    submit_btn.click()
+                    time.sleep(3)
+                    logger.info("✅ Авторизация выполнена")
+                else:
+                    logger.info("ℹ️ Ссылка 'Вход' не найдена, возможно уже авторизованы")
             except Exception as e:
-                logger.warning(f"⚠️ Ошибка авторизации: {e}")
+                logger.warning(f"⚠️ Ошибка при авторизации: {e}")
             
             # 2. Переход к созданию публикации
             logger.info("📝 Переход к созданию публикации...")
             driver.get("https://www.9111.ru/pubs/add/title/")
             time.sleep(3)
+            
+            # Проверяем, что мы на нужной странице
+            if "pubs/add/title" not in driver.current_url:
+                logger.error(f"❌ Не удалось перейти на страницу создания публикации. Текущий URL: {driver.current_url}")
+                return False
             
             # 3. Заполняем заголовок
             logger.info(f"📝 Заголовок: {title[:50]}...")
@@ -1188,7 +1190,7 @@ class NewsBot:
                 )
                 logger.info("✅ Пост в Telegram опубликован")
 
-            if self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD:
+            if self.ninth_available:
                 loop = asyncio.get_event_loop()
                 success_9111 = await loop.run_in_executor(
                     None, 
@@ -1203,7 +1205,7 @@ class NewsBot:
                 else:
                     logger.warning("⚠️ Пост опубликован только в Telegram")
             else:
-                logger.info("⏭️ Пропускаем 9111.ru")
+                logger.info("⏭️ Пропускаем 9111.ru (нет доступа)")
             
             return True
 
@@ -1274,7 +1276,7 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 11.3 - 4 УРОВНЯ ЗАЩИТЫ + 9111.RU")
+        logger.info("🚀 NEWS BOT 11.4 - 4 УРОВНЯ ЗАЩИТЫ + 9111.RU")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
@@ -1285,7 +1287,7 @@ class NewsBot:
         logger.info(f"   - Заголовки: {len(self.sent_titles)}")
         logger.info(f"   - Хеши: {len(self.sent_hashes)}")
         logger.info(f"   - Первые предложения: {len(self.sent_first_sentences)}")
-        logger.info(f"🌐 9111.ru: {'✅ доступен' if self.chrome_path and NINTH_EMAIL else '❌ недоступен'}")
+        logger.info(f"🌐 9111.ru: {'✅ ДОСТУПЕН' if self.ninth_available else '❌ НЕДОСТУПЕН'}")
         logger.info("="*80)
 
         try:
