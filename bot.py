@@ -1,7 +1,9 @@
 """
-🤖 Telegram News Bot - Версия 16.1
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (5 УРОВНЕЙ) + 9111.RU
-УПРОЩЕНА ПУБЛИКАЦИЯ НА 9111.RU
+🤖 Telegram News Bot - Версия 18.0
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + ИСПРАВЛЕНИЯ
+- Исправлена загрузка заголовков из Telegram
+- Исправлена публикация на 9111.ru
+- Сохранение заголовков в файл
 """
 
 import os
@@ -48,13 +50,8 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 
 # Данные для 9111.ru
-NINTH_EMAIL = (os.getenv('NINTH_EMAIL') or 
-               os.getenv('EMAIL_9111') or 
-               '')
-
-NINTH_PASSWORD = (os.getenv('NINTH_PASSWORD') or 
-                  os.getenv('EMAIL_PASSWORD') or 
-                  '')
+NINTH_EMAIL = os.getenv('NINTH_EMAIL', '')
+NINTH_PASSWORD = os.getenv('NINTH_PASSWORD', '')
 
 # Проверка обязательных переменных
 if not TELEGRAM_TOKEN or not CHANNEL_ID:
@@ -156,8 +153,8 @@ class NewsBot:
         """Отладка переменных окружения"""
         logger.info("=" * 50)
         logger.info("🔍 ПРОВЕРКА ПЕРЕМЕННЫХ:")
-        logger.info(f"📧 EMAIL_9111: {os.getenv('EMAIL_9111', 'не задан')}")
-        logger.info(f"🔑 EMAIL_PASSWORD: {'*' * len(os.getenv('EMAIL_PASSWORD', '')) if os.getenv('EMAIL_PASSWORD') else 'не задан'}")
+        logger.info(f"📧 NINTH_EMAIL: {NINTH_EMAIL}")
+        logger.info(f"🔑 NINTH_PASSWORD: {'*' * len(NINTH_PASSWORD) if NINTH_PASSWORD else 'не задан'}")
         logger.info("=" * 50)
 
     def _find_chrome(self) -> str:
@@ -281,38 +278,51 @@ class NewsBot:
         
         return round(similarity, 2)
 
+    # ========== ЗАГРУЗКА ЗАГОЛОВКОВ ИЗ TELEGRAM ==========
     async def load_telegram_titles_cache(self):
         """
-        Загрузка заголовков из Telegram
+        Загрузка заголовков из Telegram и из файла лога
         """
         try:
-            logger.info("📚 Загрузка заголовков из Telegram...")
+            logger.info("📚 Загрузка заголовков из Telegram и файла...")
             self.telegram_titles_cache = []
             
-            # Получаем информацию о канале
-            chat = await self.bot.get_chat(chat_id=CHANNEL_ID)
-            logger.info(f"📢 Канал: {chat.title}")
+            # 1. Загружаем из файла лога (посты, которые уже опубликовал бот)
+            if os.path.exists(POSTS_LOG_FILE):
+                with open(POSTS_LOG_FILE, 'r', encoding='utf-8') as f:
+                    posts = json.load(f)
+                    for post in posts:
+                        if 'title' in post and post['title']:
+                            self.telegram_titles_cache.append(post['title'])
+                logger.info(f"📁 Загружено {len(self.telegram_titles_cache)} заголовков из файла")
             
-            # Получаем обновления
-            updates = await self.bot.get_updates(timeout=30, limit=100)
+            # 2. Загружаем из Telegram (новые сообщения)
+            try:
+                updates = await self.bot.get_updates(timeout=30, limit=100)
+                
+                for update in updates:
+                    if update.channel_post:
+                        msg = update.channel_post
+                        
+                        if msg.caption:
+                            clean = re.sub(r'<[^>]+>', '', msg.caption)
+                            title = clean.split('\n')[0].strip()
+                        elif msg.text:
+                            clean = re.sub(r'<[^>]+>', '', msg.text)
+                            title = clean.split('\n')[0].strip()
+                        else:
+                            continue
+                        
+                        if title and len(title) > 10:
+                            if title not in self.telegram_titles_cache:
+                                self.telegram_titles_cache.append(title)
+                
+                logger.info(f"📨 Из Telegram получено обновлений: {len(updates)}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось получить обновления из Telegram: {e}")
             
-            for update in updates:
-                if update.channel_post:
-                    msg = update.channel_post
-                    
-                    if msg.caption:
-                        clean = re.sub(r'<[^>]+>', '', msg.caption)
-                        title = clean.split('\n')[0].strip()
-                    elif msg.text:
-                        clean = re.sub(r'<[^>]+>', '', msg.text)
-                        title = clean.split('\n')[0].strip()
-                    else:
-                        continue
-                    
-                    if title and len(title) > 10:
-                        self.telegram_titles_cache.append(title)
-            
-            logger.info(f"✅ Загружено {len(self.telegram_titles_cache)} заголовков")
+            logger.info(f"✅ Всего загружено {len(self.telegram_titles_cache)} заголовков")
             
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки заголовков: {e}")
@@ -325,7 +335,7 @@ class NewsBot:
             await self.load_telegram_titles_cache()
             
             if not self.telegram_titles_cache:
-                logger.warning("⚠️ Кэш заголовков пуст")
+                logger.warning("⚠️ Кэш заголовков пуст, пропускаю проверку")
                 return False, 0
         
         max_similarity = 0
@@ -991,6 +1001,10 @@ class NewsBot:
                 )
                 logger.info("✅ Пост опубликован")
             
+            # Сразу добавляем заголовок в кэш и файл
+            self.telegram_titles_cache.append(post_data['title_ru'])
+            self.log_post(post_data['link'], post_data['title_original'])
+            
             return True
             
         except TelegramError as e:
@@ -1007,9 +1021,9 @@ class NewsBot:
                 logger.error(f"❌ Ошибка Telegram: {e}")
             return False
 
-    # ========== ПУБЛИКАЦИЯ НА 9111.RU (УПРОЩЕННАЯ) ==========
+    # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
     def publish_to_9111(self, title, content, source_url):
-        """Упрощенная публикация на 9111.ru"""
+        """Публикация на 9111.ru"""
         if not self.ninth_available:
             logger.warning("⚠️ 9111.ru недоступен")
             return False
@@ -1020,6 +1034,8 @@ class NewsBot:
         try:
             logger.info("=" * 60)
             logger.info("🌐 ПУБЛИКАЦИЯ НА 9111.RU")
+            logger.info(f"📧 Email: {NINTH_EMAIL}")
+            logger.info(f"📝 Заголовок: {title[:50]}...")
             
             options = Options()
             options.add_argument("--headless=new")
@@ -1037,35 +1053,31 @@ class NewsBot:
             driver = webdriver.Chrome(options=options)
             driver.set_page_load_timeout(30)
             
-            # ПРЯМОЙ ПЕРЕХОД на страницу создания публикации
+            # Прямой переход на страницу создания
             logger.info("1️⃣ Переход на страницу создания...")
             driver.get("https://www.9111.ru/pubs/add/title/")
             time.sleep(5)
             
             logger.info(f"   Текущий URL: {driver.current_url}")
-            logger.info(f"   Заголовок: {driver.title}")
             
             # Сохраняем скриншот
             driver.save_screenshot(f"debug_9111_{timestamp}.png")
             
-            # Проверяем, не требует ли авторизации
+            # Проверяем авторизацию
             if "Вход" in driver.page_source or "login" in driver.current_url:
                 logger.info("2️⃣ Требуется авторизация")
                 
-                # Ищем ссылку "Вход"
                 login_links = driver.find_elements(By.PARTIAL_LINK_TEXT, "Вход")
                 if login_links:
                     login_links[0].click()
                     time.sleep(2)
                     
-                    # Заполняем форму
                     email_input = driver.find_element(By.NAME, "email")
                     email_input.send_keys(NINTH_EMAIL)
                     
                     pass_input = driver.find_element(By.NAME, "pass")
                     pass_input.send_keys(NINTH_PASSWORD)
                     
-                    # Отправляем
                     submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
                     submit_btn.click()
                     time.sleep(3)
@@ -1103,7 +1115,6 @@ class NewsBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка 9111.ru: {e}")
-            logger.error(traceback.format_exc())
             if driver:
                 driver.save_screenshot(f"error_9111_{timestamp}.png")
             return False
@@ -1122,11 +1133,6 @@ class NewsBot:
             if not tg_success:
                 logger.error("❌ Не удалось опубликовать в Telegram")
                 return False
-            
-            # Добавляем в кэш
-            self.telegram_titles_cache.append(post_data['title_ru'])
-            if len(self.telegram_titles_cache) > 200:
-                self.telegram_titles_cache = self.telegram_titles_cache[-200:]
             
             # Публикация на 9111.ru
             if self.ninth_available:
@@ -1165,7 +1171,7 @@ class NewsBot:
             logger.info("📭 НЕТ НОВЫХ СТАТЕЙ")
             return
 
-        # Добавляем в очередь (сортировка по времени)
+        # Добавляем в очередь
         self.post_queue.extend(news_items)
         self.post_queue.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         logger.info(f"📦 В ОЧЕРЕДИ: {len(self.post_queue)}")
@@ -1191,13 +1197,12 @@ class NewsBot:
         success = await self.publish_post(item)
         
         if success:
-            # Помечаем как отправленное
+            # Помечаем как отправленное (но не дублируем log_post, так как он уже вызван в publish_to_telegram)
             self.mark_as_sent({
                 'link': item['link'],
                 'title': item['title_original'],
                 'content': item['content_ru']
             })
-            self.log_post(item['link'], item['title_original'])
             
             next_delay = self.get_next_post_delay()
             logger.info(f"⏰ Следующая через {next_delay//60} мин")
@@ -1215,7 +1220,7 @@ class NewsBot:
     async def start(self):
         """Запуск бота"""
         logger.info("=" * 80)
-        logger.info("🚀 NEWS BOT 16.1 - УПРОЩЕННАЯ ПУБЛИКАЦИЯ")
+        logger.info("🚀 NEWS BOT 18.0 - ИСПРАВЛЕННАЯ ВЕРСИЯ")
         logger.info("=" * 80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Интервал: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
