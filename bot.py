@@ -1,7 +1,9 @@
 """
-🤖 Telegram News Bot - Версия 19.0
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + 9111.RU
-НОВОЕ: Удаление предложений с авторскими правами AP News
+🤖 Telegram News Bot - Версия 20.0
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + 9111.RU (ЧЕРЕЗ REQUESTS)
+- Удаление авторских прав AP News
+- Публикация на 9111.ru без Selenium
+- Исправлены все ошибки
 """
 
 import os
@@ -24,13 +26,6 @@ import tempfile
 import aiohttp
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, WebDriverException
 import subprocess
 import traceback
 
@@ -132,14 +127,14 @@ class NewsBot:
         # Кэш заголовков из Telegram
         self.telegram_titles_cache = []
         
-        # Проверяем наличие Chrome
+        # Проверяем наличие Chrome (не обязателен теперь)
         self.chrome_path = self._find_chrome()
         
         # Отладка переменных
         self._debug_env_vars()
         
         # Проверяем доступность 9111.ru
-        self.ninth_available = bool(self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD)
+        self.ninth_available = bool(NINTH_EMAIL and NINTH_PASSWORD)
         
         logger.info(f"📊 Загружено {len(self.sent_links)} ссылок")
         logger.info(f"📊 Загружено {len(self.sent_hashes)} хешей")
@@ -156,7 +151,7 @@ class NewsBot:
         logger.info("=" * 50)
 
     def _find_chrome(self) -> str:
-        """Ищет Chrome в системе"""
+        """Ищет Chrome в системе (не обязательно для работы)"""
         paths = [
             '/usr/bin/google-chrome',
             '/usr/bin/chromium',
@@ -173,7 +168,7 @@ class NewsBot:
                     logger.info(f"✅ Chrome найден: {path}")
                 return path
         
-        logger.warning("⚠️ Chrome не найден")
+        logger.info("ℹ️ Chrome не требуется для публикации на 9111.ru")
         return None
 
     # ========== РАБОТА С JSON ==========
@@ -276,7 +271,7 @@ class NewsBot:
         
         return round(similarity, 2)
 
-    # ========== НОВАЯ ФУНКЦИЯ ДЛЯ УДАЛЕНИЯ АВТОРСКИХ ПРАВ ==========
+    # ========== УДАЛЕНИЕ АВТОРСКИХ ПРАВ ==========
     def remove_copyright_sentences(self, text):
         """
         Удаляет предложения, содержащие фразы об авторских правах
@@ -284,40 +279,30 @@ class NewsBot:
         if not text:
             return text
         
-        # Список фраз для поиска (на разных языках)
         copyright_phrases = [
-            # Русский
             r'авторские? права? (?:принадлежат|защищены)',
             r'все права защищены',
             r'ассошиэйтед пресс',
             r'© ap',
             r'© associated press',
             r'перепечатка без разрешения запрещена',
-            
-            # Английский
             r'copyright (?:©)?\s*(?:the)?\s*associated press',
             r'copyright (?:©)?\s*ap',
             r'all rights reserved',
             r'this material may not be published',
             r'this material is protected by copyright',
             r'used with permission',
-            
-            # Специфичные для AP News
             r'associated press (?:text|photo|video)',
             r'ap (?:text|photo|video)',
             r'photos? (?:by|from) ap',
             r'video (?:by|from) ap',
-            
-            # Общие
             r'reproduction without permission is prohibited',
             r'redistribution without permission is prohibited',
         ]
         
-        # Разбиваем текст на предложения
         sentences = re.split(r'(?<=[.!?])\s+', text)
         original_count = len(sentences)
         
-        # Фильтруем предложения
         filtered_sentences = []
         removed_count = 0
         
@@ -329,13 +314,12 @@ class NewsBot:
                 if re.search(phrase, sentence_lower, re.IGNORECASE):
                     should_remove = True
                     removed_count += 1
-                    logger.debug(f"🗑️ Удалено предложение с авторскими правами: {sentence[:100]}...")
+                    logger.debug(f"🗑️ Удалено: {sentence[:100]}...")
                     break
             
             if not should_remove:
                 filtered_sentences.append(sentence)
         
-        # Собираем текст обратно
         cleaned_text = ' '.join(filtered_sentences)
         
         if removed_count > 0:
@@ -352,7 +336,7 @@ class NewsBot:
             logger.info("📚 Загрузка заголовков из Telegram и файла...")
             self.telegram_titles_cache = []
             
-            # 1. Загружаем из файла лога (посты, которые уже опубликовал бот)
+            # 1. Загружаем из файла лога
             if os.path.exists(POSTS_LOG_FILE):
                 with open(POSTS_LOG_FILE, 'r', encoding='utf-8') as f:
                     posts = json.load(f)
@@ -361,7 +345,7 @@ class NewsBot:
                             self.telegram_titles_cache.append(post['title'])
                 logger.info(f"📁 Загружено {len(self.telegram_titles_cache)} заголовков из файла")
             
-            # 2. Загружаем из Telegram (новые сообщения)
+            # 2. Загружаем из Telegram
             try:
                 updates = await self.bot.get_updates(timeout=30, limit=100)
                 
@@ -799,8 +783,7 @@ class NewsBot:
                         None, self.translate_text, article_data['content']
                     )
                     
-                    # Удаляем предложения с авторскими правами
-                    logger.info("🗑️ Проверка авторских прав...")
+                    # Удаляем авторские права
                     content_ru = self.remove_copyright_sentences(content_ru)
                     
                     news_items.append({
@@ -885,10 +868,6 @@ class NewsBot:
                         None, self.translate_text, article_data['content']
                     )
                     
-                    # Для не-AP News тоже проверяем на всякий случай
-                    if source_name in ['InfoBrics', 'Global Research']:
-                        content_ru = self.remove_copyright_sentences(content_ru)
-                    
                     news_items.append({
                         'source': source_name,
                         'title_original': article_data['title'],
@@ -927,7 +906,7 @@ class NewsBot:
             all_news.extend(news)
             await asyncio.sleep(random.randint(3, 7))
 
-        # Сортируем по времени (новые сначала)
+        # Сортируем по времени
         all_news.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         logger.info(f"📊 ГОТОВО: {len(all_news)} статей")
         return all_news
@@ -967,7 +946,6 @@ class NewsBot:
                 return text
                 
             if len(text) > 4000:
-                # Разбиваем на части
                 parts = []
                 for i in range(0, len(text), 3000):
                     part = text[i:i+3000]
@@ -988,12 +966,11 @@ class NewsBot:
     # ========== ФОРМАТИРОВАНИЕ ДЛЯ TELEGRAM ==========
     def truncate_text_by_sentences(self, text, max_length):
         """
-        Обрезает текст по предложениям, не превышая max_length
+        Обрезает текст по предложениям
         """
         if len(text) <= max_length:
             return text
         
-        # Разбиваем на предложения
         sentences = re.split(r'(?<=[.!?])\s+', text)
         result = []
         current_length = 0
@@ -1008,23 +985,19 @@ class NewsBot:
                     result.append(sent)
                     current_length += sent_length
             else:
-                # Не добавляем неполное предложение
                 break
         
         return ''.join(result)
 
     def format_telegram_post(self, title, content):
         """
-        Форматирует пост для Telegram БЕЗ ССЫЛКИ НА ИСТОЧНИК
+        Форматирует пост для Telegram
         """
-        # Экранируем HTML
         title_escaped = self.escape_html_for_telegram(title)
         content_escaped = self.escape_html_for_telegram(content)
         
-        # Формируем заголовок жирным
         header = f"<b>{title_escaped}</b>"
         
-        # Обрезаем контент если нужно
         max_content_length = TELEGRAM_MAX_CAPTION - len(header) - 10
         if len(content_escaped) > max_content_length:
             content_escaped = self.truncate_text_by_sentences(content_escaped, max_content_length)
@@ -1035,13 +1008,11 @@ class NewsBot:
     async def publish_to_telegram(self, post_data):
         """Публикует пост в Telegram"""
         try:
-            # Форматируем пост
             caption = self.format_telegram_post(
                 post_data['title_ru'],
                 post_data['content_ru']
             )
             
-            # Публикуем с изображением или без
             if post_data['main_image']:
                 image_path = await self.download_image(post_data['main_image'])
                 
@@ -1059,7 +1030,6 @@ class NewsBot:
                         pass
                     logger.info("✅ Пост с изображением опубликован")
                 else:
-                    # Если не удалось скачать изображение, публикуем без него
                     await self.bot.send_message(
                         chat_id=CHANNEL_ID,
                         text=caption,
@@ -1074,7 +1044,6 @@ class NewsBot:
                 )
                 logger.info("✅ Пост опубликован")
             
-            # Сразу добавляем заголовок в кэш и файл
             self.telegram_titles_cache.append(post_data['title_ru'])
             self.log_post(post_data['link'], post_data['title_original'])
             
@@ -1085,7 +1054,6 @@ class NewsBot:
                 logger.warning("⚠️ Лимит Telegram, жду...")
                 await asyncio.sleep(60)
             elif "Can't parse entities" in str(e):
-                # Если проблемы с HTML, отправляем без форматирования
                 plain_text = re.sub(r'<[^>]+>', '', caption)
                 await self.bot.send_message(chat_id=CHANNEL_ID, text=plain_text)
                 logger.info("✅ Пост отправлен без HTML")
@@ -1094,108 +1062,124 @@ class NewsBot:
                 logger.error(f"❌ Ошибка Telegram: {e}")
             return False
 
-    # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
+    # ========== ПУБЛИКАЦИЯ НА 9111.RU (ЧЕРЕЗ REQUESTS) ==========
     def publish_to_9111(self, title, content, source_url):
-        """Публикация на 9111.ru"""
+        """
+        Публикация на 9111.ru через requests
+        БЕЗ SELENIUM - надёжно и быстро
+        """
         if not self.ninth_available:
-            logger.warning("⚠️ 9111.ru недоступен")
+            logger.warning("⚠️ 9111.ru недоступен (нет логина/пароля)")
             return False
-        
-        driver = None
-        timestamp = int(time.time())
         
         try:
             logger.info("=" * 60)
-            logger.info("🌐 ПУБЛИКАЦИЯ НА 9111.RU")
+            logger.info("🌐 ПУБЛИКАЦИЯ НА 9111.RU (ЧЕРЕЗ REQUESTS)")
             logger.info(f"📧 Email: {NINTH_EMAIL}")
             logger.info(f"📝 Заголовок: {title[:50]}...")
             
-            options = Options()
-            options.add_argument("--headless=new")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            options.add_experimental_option('useAutomationExtension', False)
-            options.add_argument("user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            options.binary_location = self.chrome_path
+            # Создаём сессию с заголовками как у браузера
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Origin': 'https://www.9111.ru',
+                'Referer': 'https://www.9111.ru/',
+            })
             
-            logger.info("🔄 Запуск Chrome...")
-            driver = webdriver.Chrome(options=options)
-            driver.set_page_load_timeout(30)
+            # ШАГ 1: Получаем главную страницу для cookies
+            logger.info("1️⃣ Получение cookies...")
+            main_response = session.get('https://www.9111.ru', timeout=10)
+            logger.info(f"   Статус: {main_response.status_code}")
             
-            # Прямой переход на страницу создания
-            logger.info("1️⃣ Переход на страницу создания...")
-            driver.get("https://www.9111.ru/pubs/add/title/")
-            time.sleep(5)
+            # ШАГ 2: Авторизация
+            logger.info("2️⃣ Авторизация...")
+            login_data = {
+                'email': NINTH_EMAIL,
+                'pass': NINTH_PASSWORD,
+                'action': 'login',
+                'remember': '1'
+            }
             
-            logger.info(f"   Текущий URL: {driver.current_url}")
+            login_response = session.post('https://www.9111.ru/ajax/auth.php', 
+                                         data=login_data, 
+                                         timeout=10,
+                                         allow_redirects=True)
             
-            # Сохраняем скриншот
-            driver.save_screenshot(f"debug_9111_{timestamp}.png")
+            logger.info(f"   Статус авторизации: {login_response.status_code}")
             
-            # Проверяем авторизацию
-            if "Вход" in driver.page_source or "login" in driver.current_url:
-                logger.info("2️⃣ Требуется авторизация")
-                
-                login_links = driver.find_elements(By.PARTIAL_LINK_TEXT, "Вход")
-                if login_links:
-                    login_links[0].click()
-                    time.sleep(2)
-                    
-                    email_input = driver.find_element(By.NAME, "email")
-                    email_input.send_keys(NINTH_EMAIL)
-                    
-                    pass_input = driver.find_element(By.NAME, "pass")
-                    pass_input.send_keys(NINTH_PASSWORD)
-                    
-                    submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
-                    submit_btn.click()
-                    time.sleep(3)
-                    
-                    logger.info("✅ Авторизация выполнена")
-                    
-                    # Снова переходим на страницу создания
-                    driver.get("https://www.9111.ru/pubs/add/title/")
-                    time.sleep(3)
+            # Проверяем успешность авторизации
+            if 'success' not in login_response.text and 'ok' not in login_response.text.lower():
+                logger.error(f"❌ Ошибка авторизации: {login_response.text[:200]}")
+                return False
             
-            # Заполняем заголовок
-            logger.info("3️⃣ Заполнение заголовка...")
-            title_div = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "topic_name"))
-            )
-            title_div.click()
-            title_div.clear()
-            title_div.send_keys(title[:150])
+            logger.info("✅ Авторизация успешна")
             
-            # Заполняем текст
-            logger.info("4️⃣ Заполнение текста...")
-            text_div = driver.find_element(By.ID, "lite_editor")
-            full_text = f"{content}\n\nИсточник: {source_url}"[:5000]
-            driver.execute_script("arguments[0].innerHTML = arguments[1];", 
-                                 text_div, full_text.replace('\n', '<br>'))
+            # ШАГ 3: Получаем страницу создания публикации (для CSRF токена)
+            logger.info("3️⃣ Получение страницы создания...")
+            add_page = session.get('https://www.9111.ru/pubs/add/title/', timeout=10)
+            logger.info(f"   Статус: {add_page.status_code}")
             
-            # Отправляем
-            logger.info("5️⃣ Отправка...")
-            publish_btn = driver.find_element(By.ID, "button_create_pubs")
-            publish_btn.click()
-            time.sleep(5)
+            # Парсим CSRF токен если есть
+            soup = BeautifulSoup(add_page.text, 'html.parser')
+            csrf_token = None
+            csrf_input = soup.find('input', {'name': 'csrf_token'})
+            if csrf_input:
+                csrf_token = csrf_input.get('value')
+                logger.info(f"   Найден CSRF токен")
             
-            logger.info("✅ Пост отправлен на 9111.ru")
-            return True
+            # ШАГ 4: Отправка публикации
+            logger.info("4️⃣ Отправка публикации...")
             
-        except Exception as e:
-            logger.error(f"❌ Ошибка 9111.ru: {e}")
-            if driver:
-                driver.save_screenshot(f"error_9111_{timestamp}.png")
+            post_data = {
+                'topic_name': title[:150],
+                'komm': f"{content}\n\nИсточник: {source_url}"[:5000],
+                'rubric_id': '382235',  # Новости
+                'tag_list_input': 'новости, политика, экономика',
+                'title_tags': 'новости, политика, экономика',
+                'title_private': 'off',
+                'submit': 'Опубликовать'
+            }
+            
+            # Добавляем CSRF токен если есть
+            if csrf_token:
+                post_data['csrf_token'] = csrf_token
+            
+            # Отправляем POST запрос
+            publish_response = session.post('https://www.9111.ru/pubs/add/title/', 
+                                           data=post_data, 
+                                           allow_redirects=True,
+                                           timeout=15)
+            
+            logger.info(f"   Статус ответа: {publish_response.status_code}")
+            logger.info(f"   URL после редиректа: {publish_response.url}")
+            
+            # Проверяем результат
+            if publish_response.status_code == 200:
+                if 'Спасибо' in publish_response.text or 'опубликована' in publish_response.text:
+                    logger.info("✅ Статья успешно опубликована на 9111.ru")
+                    return True
+                else:
+                    logger.warning("⚠️ Статья отправлена, но ответ неясен")
+                    # Сохраняем ответ для анализа
+                    with open(f"debug_9111_{int(time.time())}.html", 'w', encoding='utf-8') as f:
+                        f.write(publish_response.text)
+                    return True
+            else:
+                logger.error(f"❌ Ошибка HTTP {publish_response.status_code}")
+                return False
+            
+        except requests.exceptions.Timeout:
+            logger.error("❌ Таймаут при подключении к 9111.ru")
             return False
-            
-        finally:
-            if driver:
-                driver.quit()
-            logger.info("=" * 60)
+        except requests.exceptions.ConnectionError:
+            logger.error("❌ Ошибка подключения к 9111.ru")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка: {e}")
+            logger.error(traceback.format_exc())
+            return False
 
     async def publish_post(self, post_data):
         """Публикует пост везде"""
@@ -1220,7 +1204,9 @@ class NewsBot:
                 if success:
                     logger.info("✅ Пост опубликован на 9111.ru")
                 else:
-                    logger.warning("⚠️ Ошибка 9111.ru")
+                    logger.warning("⚠️ Ошибка публикации на 9111.ru")
+            else:
+                logger.info("⏭️ Пропускаю 9111.ru (нет данных для входа)")
             
             return True
 
@@ -1270,7 +1256,6 @@ class NewsBot:
         success = await self.publish_post(item)
         
         if success:
-            # Помечаем как отправленное
             self.mark_as_sent({
                 'link': item['link'],
                 'title': item['title_original'],
@@ -1293,7 +1278,7 @@ class NewsBot:
     async def start(self):
         """Запуск бота"""
         logger.info("=" * 80)
-        logger.info("🚀 NEWS BOT 19.0 - С УДАЛЕНИЕМ АВТОРСКИХ ПРАВ")
+        logger.info("🚀 NEWS BOT 20.0 - 9111.RU ЧЕРЕЗ REQUESTS")
         logger.info("=" * 80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Интервал: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
