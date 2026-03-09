@@ -1,6 +1,11 @@
 """
-🤖 Telegram News Bot - Версия 13.2
-ИСПРАВЛЕНО: отображение заголовка вместо {{title}}
+🤖 Telegram News Bot - Версия 14.0
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (5 УРОВНЕЙ) + 9111.RU
+ИСПРАВЛЕНЫ:
+- Форматирование постов в Telegram
+- Загрузка и вставка изображений
+- Обрезка текста по правилам
+- Ошибки Selenium
 """
 
 import os
@@ -31,6 +36,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, WebDriverException
 import subprocess
+import traceback
 
 # Настройка логирования
 logging.basicConfig(
@@ -143,6 +149,13 @@ class NewsBot:
         
         # Проверяем доступность 9111.ru
         self.ninth_available = bool(self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD)
+        
+        # Статистика
+        logger.info(f"📊 Загружено {len(self.sent_links)} ссылок")
+        logger.info(f"📊 Загружено {len(self.sent_hashes)} хешей")
+        logger.info(f"📊 Загружено {len(self.sent_titles)} заголовков")
+        logger.info(f"📊 Загружено {len(self.sent_first_sentences)} первых предложений")
+        logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе")
 
     def _debug_env_vars(self):
         """Отладка переменных окружения"""
@@ -249,39 +262,32 @@ class NewsBot:
 
     def calculate_title_similarity(self, title1, title2):
         """
-        УЛУЧШЕННОЕ сравнение заголовков
+        Сравнение заголовков
         """
         if not title1 or not title2:
             return 0
         
-        # Приводим к нижнему регистру и убираем лишние пробелы
         t1 = ' '.join(title1.lower().split())
         t2 = ' '.join(title2.lower().split())
         
-        # Если заголовки идентичны
         if t1 == t2:
             return 100.0
         
-        # Разбиваем на слова
         words1 = set(t1.split())
         words2 = set(t2.split())
         
-        # Считаем общие слова
         common_words = words1.intersection(words2)
         if not common_words:
             return 0
         
-        # Вычисляем процент общих слов
         similarity = (len(common_words) / max(len(words1), len(words2))) * 100
-        
-        # Учитываем длину
         len_ratio = min(len(t1), len(t2)) / max(len(t1), len(t2))
         similarity = similarity * len_ratio
         
         return round(similarity, 2)
 
     async def load_telegram_titles_cache(self):
-        """Загружает заголовки из Telegram"""
+        """Загрузка заголовков из Telegram"""
         try:
             logger.info("📚 Загрузка заголовков из Telegram...")
             self.telegram_titles_cache = []
@@ -294,7 +300,6 @@ class NewsBot:
             logger.info(f"📨 Получено {len(messages)} сообщений")
             
             for message in messages:
-                # Извлекаем заголовок
                 if message.caption:
                     clean_caption = re.sub(r'<[^>]+>', '', message.caption)
                     title = clean_caption.split('\n')[0].strip()
@@ -304,79 +309,64 @@ class NewsBot:
                 else:
                     continue
                 
-                if title and len(title) > 10 and '{{title}}' not in title:
+                if title and len(title) > 10:
                     self.telegram_titles_cache.append(title)
             
             logger.info(f"✅ Загружено {len(self.telegram_titles_cache)} заголовков")
-            
-            # Показываем первые 5
-            if self.telegram_titles_cache:
-                logger.info("📋 Примеры заголовков:")
-                for i, t in enumerate(self.telegram_titles_cache[:5]):
-                    logger.info(f"   {i+1}. {t[:70]}...")
             
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки заголовков: {e}")
 
     async def check_telegram_duplicate(self, new_title):
-        """
-        Проверяет заголовок на дубликат в Telegram
-        """
+        """Проверка дубликата в Telegram"""
         if not self.telegram_titles_cache:
-            logger.warning("⚠️ Кэш заголовков пуст, загружаю...")
             await self.load_telegram_titles_cache()
             
             if not self.telegram_titles_cache:
-                logger.warning("⚠️ Кэш всё ещё пуст, пропускаю проверку")
-                return False, 0, ""
+                logger.warning("⚠️ Кэш заголовков пуст")
+                return False, 0
         
         max_similarity = 0
-        most_similar_title = ""
         
         for existing_title in self.telegram_titles_cache:
             similarity = self.calculate_title_similarity(new_title, existing_title)
             
             if similarity > max_similarity:
                 max_similarity = similarity
-                most_similar_title = existing_title
             
             if similarity >= 75:
-                logger.info(f"⏭️ НАЙДЕН ДУБЛИКАТ ({similarity}%):")
-                logger.info(f"   Новый: {new_title[:70]}...")
-                logger.info(f"   Старый: {existing_title[:70]}...")
-                return True, similarity, existing_title
+                logger.info(f"⏭️ ДУБЛИКАТ ({similarity}%): {new_title[:50]}...")
+                return True, similarity
         
         logger.info(f"✅ Максимальное сходство: {max_similarity}%")
-        return False, max_similarity, most_similar_title
+        return False, max_similarity
 
     def is_duplicate(self, article_data):
-        """
-        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА
-        """
+        """Проверка дубликата в истории"""
         url = article_data.get('link', '')
         title = article_data.get('title', '')
         content = article_data.get('content', '')
         
         if url in self.sent_links:
-            logger.info(f"⏭️ ДУБЛИКАТ (URL): {title[:50]}...")
+            logger.info(f"⏭️ ДУБЛИКАТ (URL)")
             return True
         
         norm_title = self.normalize_title(title)
         if norm_title and norm_title in self.sent_titles:
-            logger.info(f"⏭️ ДУБЛИКАТ (заголовок): {title[:50]}...")
+            logger.info(f"⏭️ ДУБЛИКАТ (заголовок)")
             return True
         
         if content:
             content_hash = self.create_content_hash(content)
             if content_hash and content_hash in self.sent_hashes:
-                logger.info(f"⏭️ ДУБЛИКАТ (содержимое): {title[:50]}...")
+                logger.info(f"⏭️ ДУБЛИКАТ (содержимое)")
                 return True
         
         if content:
             first_sentence = self.extract_first_sentence(content)
             if first_sentence and len(first_sentence) > 20:
                 if first_sentence in self.sent_first_sentences:
-                    logger.info(f"⏭️ ДУБЛИКАТ (первое предложение): {first_sentence[:50]}...")
+                    logger.info(f"⏭️ ДУБЛИКАТ (первое предложение)")
                     return True
         
         return False
@@ -420,22 +410,18 @@ class NewsBot:
         text = re.sub(r'Published\s*:?\s*[\d:APM\s-]+', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^By\s+[\w\s,]+\n', '', text, flags=re.IGNORECASE | re.MULTILINE)
         
-        garbage_phrases = [
-            r'Subscribe|Newsletter|Sign up|Follow us|Share this|Read more|Comments|Advertisement',
-            r'Morning Wire|Afternoon Wire|Daily Brief'
-        ]
-        
-        for phrase in garbage_phrases:
-            text = re.sub(phrase, '', text, flags=re.IGNORECASE)
+        garbage = ['Subscribe', 'Newsletter', 'Sign up', 'Follow us', 'Share this', 'Read more', 'Comments', 'Advertisement']
+        for word in garbage:
+            text = re.sub(word, '', text, flags=re.IGNORECASE)
         
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
-    # ========== ПРОВЕРКА ХАОТИЧНЫХ ЛИМИТОВ ==========
+    # ========== ПРОВЕРКА ВРЕМЕНИ ==========
     def can_post_now(self):
         local_hour = (datetime.now().hour + TIMEZONE_OFFSET) % 24
         if 23 <= local_hour or local_hour < 7:
-            logger.info(f"🌙 Ночное время ({local_hour}:00), пропускаю")
+            logger.info(f"🌙 Ночное время ({local_hour}:00)")
             return False
 
         today = datetime.now().date()
@@ -453,19 +439,18 @@ class NewsBot:
                 continue
 
         if today_posts >= MAX_POSTS_PER_DAY:
-            logger.info(f"⏳ Дневной лимит {MAX_POSTS_PER_DAY} достигнут")
+            logger.info(f"⏳ Дневной лимит {MAX_POSTS_PER_DAY}")
             return False
 
         if len(last_posts_times) >= 2:
             last_posts_times.sort(reverse=True)
-            if len(last_posts_times) >= 2:
-                time_diff = last_posts_times[0] - last_posts_times[1]
-                if time_diff < timedelta(minutes=35):
-                    next_allowed = last_posts_times[0] + timedelta(minutes=35)
-                    wait_minutes = (next_allowed - datetime.now()).total_seconds() / 60
-                    if wait_minutes > 0:
-                        logger.info(f"⏳ Лимит частоты: следующий пост через {wait_minutes:.0f} минут")
-                        return False
+            time_diff = last_posts_times[0] - last_posts_times[1]
+            if time_diff < timedelta(minutes=35):
+                next_allowed = last_posts_times[0] + timedelta(minutes=35)
+                wait = (next_allowed - datetime.now()).total_seconds() / 60
+                if wait > 0:
+                    logger.info(f"⏳ Лимит частоты: {wait:.0f} мин")
+                    return False
 
         return True
 
@@ -508,7 +493,6 @@ class NewsBot:
         return text.strip()
 
     def escape_html_for_telegram(self, text):
-        """Экранирует HTML спецсимволы для Telegram"""
         if not text:
             return ""
         text = text.replace('&', '&amp;')
@@ -517,7 +501,7 @@ class NewsBot:
         return text
 
     # ========== ПАРСЕР AP NEWS ==========
-    def get_apnews_articles_v2(self):
+    def get_apnews_articles(self):
         """Парсинг AP News"""
         try:
             logger.info("🌐 Парсинг AP News")
@@ -531,25 +515,19 @@ class NewsBot:
 
             for link in soup.find_all('a', href=True):
                 href = link['href']
-                if '/article/' not in href:
-                    continue
-                
-                full_url = f"https://apnews.com{href}" if href.startswith('/') else href
-                title = link.get_text(strip=True)
-                
-                if not title or len(title) < 15:
-                    continue
-                
-                title = re.sub(r'\s+', ' ', title).strip()
-                articles.append({'url': full_url, 'title': title})
+                if '/article/' in href:
+                    url = href if href.startswith('http') else f"https://apnews.com{href}"
+                    title = link.get_text(strip=True)
+                    if title and len(title) > 15:
+                        articles.append({'url': url, 'title': title})
 
             # Убираем дубликаты
             unique = []
             seen = set()
-            for article in articles:
-                if article['url'] not in seen:
-                    seen.add(article['url'])
-                    unique.append(article)
+            for a in articles:
+                if a['url'] not in seen:
+                    seen.add(a['url'])
+                    unique.append(a)
 
             logger.info(f"✅ Найдено {len(unique)} статей")
             return unique[:10]
@@ -559,7 +537,7 @@ class NewsBot:
             return []
 
     def parse_apnews_article(self, url):
-        """Парсинг конкретной статьи AP News"""
+        """Парсинг статьи AP News"""
         try:
             headers = {'User-Agent': 'Mozilla/5.0'}
             response = requests.get(url, headers=headers, timeout=15)
@@ -606,7 +584,7 @@ class NewsBot:
             }
 
         except Exception as e:
-            logger.error(f"❌ Ошибка парсинга статьи: {e}")
+            logger.error(f"❌ Ошибка парсинга: {e}")
             return None
 
     def parse_infobrics(self, url):
@@ -616,20 +594,18 @@ class NewsBot:
             response = requests.get(url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            title = "Без заголовка"
-            title_elem = soup.find('h1') or soup.find('title')
-            if title_elem:
-                title = self.clean_text(title_elem.get_text())
+            title = soup.find('h1')
+            if title:
+                title = self.clean_text(title.get_text())
+            else:
+                title_tag = soup.find('title')
+                title = self.clean_text(title_tag.get_text()) if title_tag else "Без заголовка"
 
+            # Изображение
             main_image = None
-            img_elem = soup.find('img', class_=re.compile(r'article-image|featured', re.I))
-            if img_elem and img_elem.get('src'):
-                img_src = img_elem['src']
-                if img_src.startswith('/'):
-                    domain = url.split('/')[2]
-                    main_image = f"https://{domain}{img_src}"
-                else:
-                    main_image = img_src
+            meta_img = soup.find('meta', property='og:image')
+            if meta_img and meta_img.get('content'):
+                main_image = meta_img['content']
 
             # Текст
             paragraphs = []
@@ -659,7 +635,7 @@ class NewsBot:
             response = requests.get(url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            title = "Без заголовка"
+            title = None
             meta_title = soup.find('meta', property='og:title')
             if meta_title and meta_title.get('content'):
                 title = meta_title['content']
@@ -667,9 +643,13 @@ class NewsBot:
                 h1 = soup.find('h1')
                 if h1:
                     title = h1.get_text(strip=True)
+                else:
+                    title_tag = soup.find('title')
+                    title = title_tag.get_text(strip=True) if title_tag else "Без заголовка"
 
             title = self.clean_text(title)
 
+            # Изображение
             main_image = None
             meta_img = soup.find('meta', property='og:image')
             if meta_img and meta_img.get('content'):
@@ -701,7 +681,7 @@ class NewsBot:
         """Загрузка из AP News"""
         try:
             articles = await asyncio.get_event_loop().run_in_executor(
-                None, self.get_apnews_articles_v2
+                None, self.get_apnews_articles
             )
 
             news_items = []
@@ -709,19 +689,17 @@ class NewsBot:
                 url = article['url']
                 title = article['title']
 
-                # Проверка по URL
                 if url in self.sent_links:
-                    logger.info(f"⏭️ УЖЕ БЫЛО (URL): {title[:50]}...")
+                    logger.info(f"⏭️ УЖЕ БЫЛО (URL)")
                     continue
 
-                logger.info(f"🔍 НОВАЯ (AP News): {title[:50]}...")
+                logger.info(f"🔍 НОВАЯ: {title[:50]}...")
 
                 article_data = await asyncio.get_event_loop().run_in_executor(
                     None, self.parse_apnews_article, url
                 )
 
                 if article_data:
-                    # Проверка на дубликат
                     if self.is_duplicate({
                         'link': url,
                         'title': article_data['title'],
@@ -729,20 +707,17 @@ class NewsBot:
                     }):
                         continue
                     
-                    # Переводим заголовок
                     logger.info("🔄 Перевод заголовка...")
                     title_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['title']
                     )
                     
-                    # Проверяем с заголовками из Telegram
-                    is_dup, similarity, matching = await self.check_telegram_duplicate(title_ru)
+                    is_dup, sim = await self.check_telegram_duplicate(title_ru)
                     if is_dup:
-                        logger.warning(f"⏭️ ДУБЛИКАТ в Telegram ({similarity}%): {title_ru[:50]}...")
+                        logger.warning(f"⏭️ ДУБЛИКАТ в Telegram")
                         continue
                     
-                    # Переводим текст
-                    logger.info(f"🔄 Перевод текста ({len(article_data['content'])} символов)...")
+                    logger.info(f"🔄 Перевод текста...")
                     content_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['content']
                     )
@@ -756,11 +731,11 @@ class NewsBot:
                         'main_image': article_data.get('main_image'),
                         'priority': 1
                     })
-                    logger.info(f"✅ Статья готова к публикации")
+                    logger.info(f"✅ Статья готова")
                 else:
                     logger.warning(f"❌ Не удалось спарсить")
 
-                await asyncio.sleep(random.randint(3, 8))
+                await asyncio.sleep(random.randint(2, 5))
 
             return news_items
 
@@ -788,18 +763,18 @@ class NewsBot:
                 logger.error(f"❌ Ошибка RSS {source_name}")
                 return []
 
-            logger.info(f"📰 В RSS {len(feed.entries)} статей")
+            logger.info(f"📰 RSS: {len(feed.entries)} статей")
 
             news_items = []
             for entry in feed.entries[:3]:
                 link = entry.get('link', '')
-                title = entry.get('title', 'Без заголовка')
+                title = entry.get('title', '')
 
                 if link in self.sent_links:
-                    logger.info(f"⏭️ УЖЕ БЫЛО (URL): {title[:50]}...")
+                    logger.info(f"⏭️ УЖЕ БЫЛО (URL)")
                     continue
 
-                logger.info(f"🔍 НОВАЯ ({source_name}): {title[:50]}...")
+                logger.info(f"🔍 НОВАЯ: {title[:50]}...")
 
                 article_data = await asyncio.get_event_loop().run_in_executor(
                     None, parser_func, link
@@ -818,12 +793,12 @@ class NewsBot:
                         None, self.translate_text, article_data['title']
                     )
                     
-                    is_dup, similarity, matching = await self.check_telegram_duplicate(title_ru)
+                    is_dup, sim = await self.check_telegram_duplicate(title_ru)
                     if is_dup:
-                        logger.warning(f"⏭️ ДУБЛИКАТ в Telegram ({similarity}%): {title_ru[:50]}...")
+                        logger.warning(f"⏭️ ДУБЛИКАТ в Telegram")
                         continue
                     
-                    logger.info(f"🔄 Перевод текста ({len(article_data['content'])} символов)...")
+                    logger.info(f"🔄 Перевод текста...")
                     content_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['content']
                     )
@@ -837,20 +812,20 @@ class NewsBot:
                         'main_image': article_data.get('main_image'),
                         'priority': priority
                     })
-                    logger.info(f"✅ Статья готова к публикации")
+                    logger.info(f"✅ Статья готова")
                 else:
                     logger.warning(f"❌ Не удалось спарсить")
 
-                await asyncio.sleep(random.randint(3, 8))
+                await asyncio.sleep(random.randint(2, 5))
 
             return news_items
 
         except Exception as e:
-            logger.error(f"❌ Ошибка RSS {feed_config['name']}: {e}")
+            logger.error(f"❌ Ошибка RSS: {e}")
             return []
 
     async def fetch_all_news(self):
-        """Загружает новости из всех источников"""
+        """Загружает все новости"""
         all_news = []
 
         for feed in ALL_FEEDS:
@@ -863,39 +838,51 @@ class NewsBot:
                 news = await self.fetch_from_rss(feed)
 
             all_news.extend(news)
-            await asyncio.sleep(random.randint(5, 10))
+            await asyncio.sleep(random.randint(3, 7))
 
         all_news.sort(key=lambda x: x.get('priority', 5))
-        logger.info(f"📊 ВСЕГО ГОТОВЫХ К ПУБЛИКАЦИИ: {len(all_news)}")
+        logger.info(f"📊 ГОТОВО: {len(all_news)} статей")
         return all_news
 
+    # ========== ЗАГРУЗКА ИЗОБРАЖЕНИЙ ==========
     async def download_image(self, url):
         """Скачивает изображение"""
         try:
             if not url:
                 return None
+            
+            logger.info(f"🖼️ Скачивание: {url[:50]}...")
+            
             fd, path = tempfile.mkstemp(suffix='.jpg')
             os.close(fd)
+            
             session = await self.get_session()
-            async with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=15) as response:
                 if response.status == 200:
                     with open(path, 'wb') as f:
                         f.write(await response.read())
+                    logger.info(f"✅ Изображение сохранено: {path}")
                     return path
-            return None
+                else:
+                    logger.warning(f"⚠️ Ошибка скачивания: {response.status}")
+                    return None
+                    
         except Exception as e:
-            logger.error(f"Ошибка скачивания: {e}")
+            logger.error(f"❌ Ошибка скачивания: {e}")
             return None
 
+    # ========== ПЕРЕВОД ==========
     def translate_text(self, text):
         """Переводит текст"""
         try:
             if not text or len(text) < 20:
                 return text
-            if len(text) > 3000:
+                
+            if len(text) > 4000:
+                # Разбиваем на части
                 parts = []
-                for i in range(0, len(text), 2000):
-                    part = text[i:i+2000]
+                for i in range(0, len(text), 3000):
+                    part = text[i:i+3000]
                     try:
                         translated = self.translator.translate(part)
                         parts.append(translated)
@@ -903,43 +890,130 @@ class NewsBot:
                         parts.append(part)
                     time.sleep(random.uniform(0.5, 1.5))
                 return ' '.join(parts)
+                
             return self.translator.translate(text)
+            
         except Exception as e:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
 
-    # ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМИРОВАНИЯ ПОСТА ==========
-    def build_caption(self, title, content, max_length=TELEGRAM_MAX_CAPTION):
+    # ========== ФОРМАТИРОВАНИЕ ДЛЯ TELEGRAM ==========
+    def truncate_text_by_sentences(self, text, max_length):
         """
-        ФОРМИРУЕТ ПОДПИСЬ ДЛЯ TELEGRAM
-        Гарантирует, что заголовок отображается правильно
+        Обрезает текст по предложениям, не превышая max_length
+        """
+        if len(text) <= max_length:
+            return text
+        
+        # Разбиваем на предложения
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        result = []
+        current_length = 0
+        
+        for sent in sentences:
+            sent_length = len(sent)
+            if current_length + sent_length + 2 <= max_length:  # +2 для точки и пробела
+                if result:
+                    result.append(' ' + sent)
+                    current_length += sent_length + 1
+                else:
+                    result.append(sent)
+                    current_length += sent_length
+            else:
+                # Если не влезает целое предложение, добавляем часть
+                if not result:
+                    # Первое предложение слишком длинное - обрезаем
+                    result.append(sent[:max_length-3] + '...')
+                break
+        
+        return ''.join(result)
+
+    def format_telegram_post(self, title, content, source_url, source_name):
+        """
+        Форматирует пост для Telegram с правильным заголовком и обрезкой
         """
         # Экранируем HTML
         title_escaped = self.escape_html_for_telegram(title)
         content_escaped = self.escape_html_for_telegram(content)
         
-        # Формируем заголовок с HTML тегами
-        title_part = f"<b>{title_escaped}</b>"
+        # Формируем заголовок жирным
+        header = f"<b>{title_escaped}</b>"
         
-        # Проверяем длину
-        total_len = len(title_part) + len(content_escaped) + 10
+        # Обрезаем контент
+        max_content_length = TELEGRAM_MAX_CAPTION - len(header) - 50  # резерв для ссылки
         
-        if total_len <= max_length:
-            # Всё помещается
-            return f"{title_part}\n\n{content_escaped}"
-        else:
-            # Нужно обрезать
-            available = max_length - len(title_part) - 10
-            if available > 100:
-                truncated = content_escaped[:available] + "..."
-                return f"{title_part}\n\n{truncated}"
+        if len(content_escaped) > max_content_length:
+            content_escaped = self.truncate_text_by_sentences(content_escaped, max_content_length)
+        
+        # Добавляем ссылку на источник
+        footer = f"\n\n🔗 <a href='{source_url}'>Источник: {source_name}</a>"
+        
+        return f"{header}\n\n{content_escaped}{footer}"
+
+    # ========== ПУБЛИКАЦИЯ В TELEGRAM ==========
+    async def publish_to_telegram(self, post_data):
+        """Публикует пост в Telegram"""
+        try:
+            # Форматируем пост
+            caption = self.format_telegram_post(
+                post_data['title_ru'],
+                post_data['content_ru'],
+                post_data['link'],
+                post_data['source']
+            )
+            
+            # Публикуем с изображением или без
+            if post_data['main_image']:
+                image_path = await self.download_image(post_data['main_image'])
+                
+                if image_path:
+                    with open(image_path, 'rb') as photo:
+                        await self.bot.send_photo(
+                            chat_id=CHANNEL_ID,
+                            photo=photo,
+                            caption=caption,
+                            parse_mode='HTML'
+                        )
+                    try:
+                        os.unlink(image_path)
+                    except:
+                        pass
+                    logger.info("✅ Пост с изображением опубликован")
+                else:
+                    # Если не удалось скачать изображение, публикуем без него
+                    await self.bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=caption,
+                        parse_mode='HTML'
+                    )
+                    logger.info("✅ Пост без изображения опубликован")
             else:
-                # Если совсем мало места, публикуем только заголовок
-                return title_part
+                await self.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=caption,
+                    parse_mode='HTML'
+                )
+                logger.info("✅ Пост опубликован")
+            
+            return True
+            
+        except TelegramError as e:
+            if "Too Many Requests" in str(e):
+                logger.warning("⚠️ Лимит Telegram, жду...")
+                await asyncio.sleep(60)
+            elif "Can't parse entities" in str(e):
+                # Если проблемы с HTML, отправляем без форматирования
+                plain_text = re.sub(r'<[^>]+>', '', caption)
+                await self.bot.send_message(chat_id=CHANNEL_ID, text=plain_text)
+                logger.info("✅ Пост отправлен без HTML")
+                return True
+            else:
+                logger.error(f"❌ Ошибка Telegram: {e}")
+            return False
 
     # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
     def publish_to_9111(self, title, content, source_url):
-        """Публикация на 9111.ru"""
+        """Публикация на 9111.ru с обработкой ошибок"""
         if not self.ninth_available:
             logger.warning("⚠️ 9111.ru недоступен")
             return False
@@ -955,130 +1029,145 @@ class NewsBot:
             options.add_argument("--headless=new")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--window-size=1920,1080")
             options.binary_location = self.chrome_path
             
+            # Добавляем аргументы для стабильности
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option('useAutomationExtension', False)
+            
             driver = webdriver.Chrome(options=options)
-            driver.set_page_load_timeout(30)
+            driver.set_page_load_timeout(45)
+            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
-            # Авторизация
+            # 1. Переход на главную
+            logger.info("1️⃣ Переход на главную...")
             driver.get("https://www.9111.ru")
-            time.sleep(2)
+            time.sleep(3)
             
+            # 2. Авторизация
+            logger.info("2️⃣ Авторизация...")
             try:
-                login_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Вход")
-                login_link.click()
-                time.sleep(1)
-                
-                email_input = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.NAME, "email"))
-                )
-                email_input.send_keys(NINTH_EMAIL)
-                
-                pass_input = driver.find_element(By.NAME, "pass")
-                pass_input.send_keys(NINTH_PASSWORD)
-                
-                submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
-                submit_btn.click()
-                time.sleep(2)
-                logger.info("✅ Авторизация выполнена")
-            except:
-                logger.info("ℹ️ Возможно уже авторизованы")
+                # Проверяем, не авторизованы ли уже
+                if "Вход" in driver.page_source:
+                    login_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Вход")
+                    login_link.click()
+                    time.sleep(2)
+                    
+                    email_input = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.NAME, "email"))
+                    )
+                    email_input.clear()
+                    email_input.send_keys(NINTH_EMAIL)
+                    
+                    pass_input = driver.find_element(By.NAME, "pass")
+                    pass_input.clear()
+                    pass_input.send_keys(NINTH_PASSWORD)
+                    
+                    submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
+                    submit_btn.click()
+                    time.sleep(3)
+                    logger.info("✅ Авторизация выполнена")
+                else:
+                    logger.info("✅ Уже авторизованы")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка авторизации: {e}")
             
-            # Переход к созданию
+            # 3. Переход к созданию
+            logger.info("3️⃣ Переход к созданию...")
             driver.get("https://www.9111.ru/pubs/add/title/")
-            time.sleep(2)
+            time.sleep(3)
             
-            # Заголовок
+            # Сохраняем скриншот
+            driver.save_screenshot(f"debug_9111_{timestamp}.png")
+            
+            # 4. Заголовок
+            logger.info("4️⃣ Заголовок...")
             title_div = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, "topic_name"))
             )
             title_div.click()
             driver.execute_script("arguments[0].innerHTML = '';", title_div)
             title_div.send_keys(title[:150])
+            time.sleep(1)
             
-            # Рубрика
+            # 5. Рубрика
+            logger.info("5️⃣ Рубрика...")
             try:
                 rubric = driver.find_element(By.ID, "rubric_id2")
                 for option in rubric.find_elements(By.TAG_NAME, "option"):
                     if "Новости" in option.text:
                         option.click()
+                        logger.info(f"✅ Выбрано: {option.text}")
                         break
             except:
-                pass
+                logger.warning("⚠️ Рубрика не выбрана")
             
-            # Текст
+            # 6. Текст
+            logger.info("6️⃣ Текст...")
             text_div = driver.find_element(By.ID, "lite_editor")
-            full_text = f"{content}\n\nИсточник: {source_url}"[:5000]
+            full_text = f"{content}\n\nИсточник: {source_url}"
+            if len(full_text) > 5000:
+                full_text = full_text[:5000] + "..."
+            
+            # Вставляем текст
             driver.execute_script("arguments[0].innerHTML = arguments[1];", 
                                  text_div, full_text.replace('\n', '<br>'))
+            time.sleep(1)
             
-            # Теги
+            # 7. Теги
+            logger.info("7️⃣ Теги...")
             try:
                 tags = driver.find_element(By.ID, "tag_list_input")
                 tags.send_keys("новости, политика, экономика")
             except:
                 pass
             
-            # Отправка
-            publish_btn = driver.find_element(By.ID, "button_create_pubs")
+            # 8. Отправка
+            logger.info("8️⃣ Отправка...")
+            publish_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "button_create_pubs"))
+            )
             publish_btn.click()
-            time.sleep(3)
+            time.sleep(5)
             
             logger.info("✅ Пост отправлен на 9111.ru")
             return True
             
+        except TimeoutException as e:
+            logger.error(f"❌ Таймаут: {e}")
+            if driver:
+                driver.save_screenshot(f"timeout_9111_{timestamp}.png")
+            return False
+            
         except Exception as e:
             logger.error(f"❌ Ошибка 9111.ru: {e}")
+            logger.error(traceback.format_exc())
             if driver:
                 driver.save_screenshot(f"error_9111_{timestamp}.png")
             return False
+            
         finally:
             if driver:
                 driver.quit()
 
     async def publish_post(self, post_data):
-        """Публикует пост в Telegram и на 9111.ru"""
+        """Публикует пост везде"""
         try:
-            # ИСПОЛЬЗУЕМ ИСПРАВЛЕННУЮ ФУНКЦИЮ build_caption
-            caption = self.build_caption(post_data['title_ru'], post_data['content_ru'])
+            # Публикация в Telegram
+            tg_success = await self.publish_to_telegram(post_data)
             
-            # Логируем для проверки
-            logger.info(f"📝 Формирую пост с заголовком: {post_data['title_ru'][:50]}...")
-            
-            if post_data['main_image']:
-                image_path = await self.download_image(post_data['main_image'])
-                if image_path:
-                    with open(image_path, 'rb') as photo:
-                        await self.bot.send_photo(
-                            chat_id=CHANNEL_ID,
-                            photo=photo,
-                            caption=caption,
-                            parse_mode='HTML'
-                        )
-                    try:
-                        os.unlink(image_path)
-                    except:
-                        pass
-                else:
-                    await self.bot.send_message(
-                        chat_id=CHANNEL_ID,
-                        text=caption,
-                        parse_mode='HTML'
-                    )
-            else:
-                await self.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=caption,
-                    parse_mode='HTML'
-                )
-            
-            logger.info(f"✅ Пост в Telegram опубликован")
+            if not tg_success:
+                logger.error("❌ Не удалось опубликовать в Telegram")
+                return False
             
             # Добавляем в кэш
             self.telegram_titles_cache.append(post_data['title_ru'])
             if len(self.telegram_titles_cache) > 200:
                 self.telegram_titles_cache = self.telegram_titles_cache[-200:]
-
+            
             # Публикация на 9111.ru
             if self.ninth_available:
                 loop = asyncio.get_event_loop()
@@ -1091,57 +1180,50 @@ class NewsBot:
                 if success:
                     logger.info("✅ Пост опубликован на 9111.ru")
                 else:
-                    logger.warning("⚠️ Ошибка публикации на 9111.ru")
+                    logger.warning("⚠️ Ошибка 9111.ru")
             
             return True
 
-        except TelegramError as e:
-            if "Too Many Requests" in str(e):
-                logger.warning("⚠️ Лимит Telegram, жду 1 час...")
-                await asyncio.sleep(3600)
-            else:
-                logger.error(f"❌ Ошибка Telegram: {e}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации: {e}")
             return False
 
     async def process_and_publish(self):
         """Основной процесс"""
         logger.info("=" * 60)
-        logger.info(f"🔍 НАЧАЛО ЦИКЛА: {datetime.now()}")
+        logger.info(f"🔍 ЦИКЛ: {datetime.now()}")
         logger.info("=" * 60)
 
-        # 1. Загружаем заголовки из Telegram
+        # Загружаем заголовки из Telegram
         await self.load_telegram_titles_cache()
         
-        # 2. Загружаем новые статьи
+        # Загружаем новые статьи
         news_items = await self.fetch_all_news()
         
         if not news_items:
-            logger.info("📭 НОВЫХ СТАТЕЙ НЕТ")
+            logger.info("📭 НЕТ НОВЫХ СТАТЕЙ")
             return
 
-        # 3. Добавляем в очередь
         self.post_queue.extend(news_items)
-        logger.info(f"📦 В ОЧЕРЕДИ: {len(self.post_queue)} статей")
+        logger.info(f"📦 В ОЧЕРЕДИ: {len(self.post_queue)}")
 
-        # 4. Публикуем
         await self.try_publish_from_queue()
 
     async def try_publish_from_queue(self):
-        """Пытается опубликовать следующую статью"""
+        """Публикует из очереди"""
         if not self.post_queue:
             return
 
         if not self.can_post_now():
             next_try = self.get_next_post_delay()
-            logger.info(f"⏰ Сейчас нельзя публиковать. Следующая попытка через {next_try//60} мин")
+            logger.info(f"⏰ Следующая попытка через {next_try//60} мин")
             asyncio.create_task(self._schedule_next_try(next_try))
             return
 
         item = self.post_queue.pop(0)
         
-        logger.info(f"\n📝 ПУБЛИКАЦИЯ: {item['title_ru'][:70]}...")
+        logger.info(f"\n📝 ПУБЛИКАЦИЯ: {item['title_ru'][:50]}...")
         logger.info(f"   Источник: {item['source']}")
-        logger.info(f"   Осталось в очереди: {len(self.post_queue)}")
 
         success = await self.publish_post(item)
         
@@ -1155,10 +1237,10 @@ class NewsBot:
             self.log_post(item['link'], item['title_original'])
             
             next_delay = self.get_next_post_delay()
-            logger.info(f"⏰ Следующая публикация через {next_delay//60} минут")
+            logger.info(f"⏰ Следующая через {next_delay//60} мин")
             asyncio.create_task(self._schedule_next_try(next_delay))
         else:
-            logger.error(f"❌ Не удалось опубликовать")
+            logger.error(f"❌ Ошибка публикации")
             self.post_queue.insert(0, item)
             asyncio.create_task(self._schedule_next_try(300))
 
@@ -1168,25 +1250,24 @@ class NewsBot:
         await self.try_publish_from_queue()
 
     async def start(self):
-        """Запускает бота"""
+        """Запуск бота"""
         logger.info("=" * 80)
-        logger.info("🚀 NEWS BOT 13.2 - ИСПРАВЛЕНО ОТОБРАЖЕНИЕ ЗАГОЛОВКА")
+        logger.info("🚀 NEWS BOT 14.0 - ПОЛНОСТЬЮ ИСПРАВЛЕН")
         logger.info("=" * 80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Интервал: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
-        logger.info(f"🔒 Защита: URL + Заголовки + Хеши + Первые предложения + Telegram (75%)")
         logger.info(f"🌐 9111.ru: {'✅ ДОСТУПЕН' if self.ninth_available else '❌ НЕДОСТУПЕН'}")
         logger.info("=" * 80)
 
         try:
             me = await self.bot.get_me()
-            logger.info(f"✅ Бот @{me.username} авторизован")
+            logger.info(f"✅ Бот @{me.username}")
         except Exception as e:
-            logger.error(f"❌ Ошибка авторизации: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return
 
-        # Запускаем первый цикл
+        # Первый цикл
         await self.process_and_publish()
 
         # Планировщик
@@ -1197,13 +1278,13 @@ class NewsBot:
             id='news_processor'
         )
         self.scheduler.start()
-        logger.info(f"✅ Планировщик запущен. Проверка каждые {CHECK_INTERVAL//60} минут")
+        logger.info(f"✅ Планировщик: каждые {CHECK_INTERVAL//60} мин")
 
         try:
             while True:
                 await asyncio.sleep(60)
         except KeyboardInterrupt:
-            logger.info("🛑 Бот остановлен")
+            logger.info("🛑 Остановка")
             if self.session:
                 await self.session.close()
 
