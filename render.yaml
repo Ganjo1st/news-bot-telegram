@@ -1,0 +1,16 @@
+# render.yaml
+services:
+  - type: worker
+    name: news-bot-telegram
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: NINTH_EMAIL
+        sync: false
+      - key: NINTH_PASSWORD
+        sync: false
