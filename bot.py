@@ -1,9 +1,7 @@
 """
-🤖 Telegram News Bot - Версия 18.0
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + ИСПРАВЛЕНИЯ
-- Исправлена загрузка заголовков из Telegram
-- Исправлена публикация на 9111.ru
-- Сохранение заголовков в файл
+🤖 Telegram News Bot - Версия 19.0
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ + 9111.RU
+НОВОЕ: Удаление предложений с авторскими правами AP News
 """
 
 import os
@@ -277,6 +275,73 @@ class NewsBot:
         similarity = similarity * len_ratio
         
         return round(similarity, 2)
+
+    # ========== НОВАЯ ФУНКЦИЯ ДЛЯ УДАЛЕНИЯ АВТОРСКИХ ПРАВ ==========
+    def remove_copyright_sentences(self, text):
+        """
+        Удаляет предложения, содержащие фразы об авторских правах
+        """
+        if not text:
+            return text
+        
+        # Список фраз для поиска (на разных языках)
+        copyright_phrases = [
+            # Русский
+            r'авторские? права? (?:принадлежат|защищены)',
+            r'все права защищены',
+            r'ассошиэйтед пресс',
+            r'© ap',
+            r'© associated press',
+            r'перепечатка без разрешения запрещена',
+            
+            # Английский
+            r'copyright (?:©)?\s*(?:the)?\s*associated press',
+            r'copyright (?:©)?\s*ap',
+            r'all rights reserved',
+            r'this material may not be published',
+            r'this material is protected by copyright',
+            r'used with permission',
+            
+            # Специфичные для AP News
+            r'associated press (?:text|photo|video)',
+            r'ap (?:text|photo|video)',
+            r'photos? (?:by|from) ap',
+            r'video (?:by|from) ap',
+            
+            # Общие
+            r'reproduction without permission is prohibited',
+            r'redistribution without permission is prohibited',
+        ]
+        
+        # Разбиваем текст на предложения
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        original_count = len(sentences)
+        
+        # Фильтруем предложения
+        filtered_sentences = []
+        removed_count = 0
+        
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            should_remove = False
+            
+            for phrase in copyright_phrases:
+                if re.search(phrase, sentence_lower, re.IGNORECASE):
+                    should_remove = True
+                    removed_count += 1
+                    logger.debug(f"🗑️ Удалено предложение с авторскими правами: {sentence[:100]}...")
+                    break
+            
+            if not should_remove:
+                filtered_sentences.append(sentence)
+        
+        # Собираем текст обратно
+        cleaned_text = ' '.join(filtered_sentences)
+        
+        if removed_count > 0:
+            logger.info(f"🗑️ Удалено {removed_count} предложений с авторскими правами")
+        
+        return cleaned_text
 
     # ========== ЗАГРУЗКА ЗАГОЛОВКОВ ИЗ TELEGRAM ==========
     async def load_telegram_titles_cache(self):
@@ -734,6 +799,10 @@ class NewsBot:
                         None, self.translate_text, article_data['content']
                     )
                     
+                    # Удаляем предложения с авторскими правами
+                    logger.info("🗑️ Проверка авторских прав...")
+                    content_ru = self.remove_copyright_sentences(content_ru)
+                    
                     news_items.append({
                         'source': 'AP News',
                         'title_original': article_data['title'],
@@ -815,6 +884,10 @@ class NewsBot:
                     content_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['content']
                     )
+                    
+                    # Для не-AP News тоже проверяем на всякий случай
+                    if source_name in ['InfoBrics', 'Global Research']:
+                        content_ru = self.remove_copyright_sentences(content_ru)
                     
                     news_items.append({
                         'source': source_name,
@@ -1197,7 +1270,7 @@ class NewsBot:
         success = await self.publish_post(item)
         
         if success:
-            # Помечаем как отправленное (но не дублируем log_post, так как он уже вызван в publish_to_telegram)
+            # Помечаем как отправленное
             self.mark_as_sent({
                 'link': item['link'],
                 'title': item['title_original'],
@@ -1220,7 +1293,7 @@ class NewsBot:
     async def start(self):
         """Запуск бота"""
         logger.info("=" * 80)
-        logger.info("🚀 NEWS BOT 18.0 - ИСПРАВЛЕННАЯ ВЕРСИЯ")
+        logger.info("🚀 NEWS BOT 19.0 - С УДАЛЕНИЕМ АВТОРСКИХ ПРАВ")
         logger.info("=" * 80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Интервал: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
