@@ -1,11 +1,7 @@
 """
-🤖 Telegram News Bot - Версия 13.0
+🤖 Telegram News Bot - Версия 13.1
 АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (5 УРОВНЕЙ) + 9111.RU
-ПРАВИЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ:
-1. Парсинг источников
-2. Перевод заголовка и текста
-3. Проверка схожести заголовка с уже опубликованными в Telegram
-4. Публикация только если уникален
+ИСПРАВЛЕНА ЗАГРУЗКА ЗАГОЛОВКОВ ИЗ TELEGRAM
 """
 
 import os
@@ -137,7 +133,7 @@ class NewsBot:
         self.last_post_time = None
         self.post_queue = []
         
-        # Кэш заголовков из Telegram (загружается при старте)
+        # Кэш заголовков из Telegram
         self.telegram_titles_cache = []
         
         # Проверяем наличие Chrome
@@ -148,12 +144,6 @@ class NewsBot:
         
         # Проверяем доступность 9111.ru
         self.ninth_available = bool(self.chrome_path and NINTH_EMAIL and NINTH_PASSWORD)
-        
-        logger.info(f"📊 Загружено {len(self.sent_links)} ссылок")
-        logger.info(f"📊 Загружено {len(self.sent_hashes)} хешей")
-        logger.info(f"📊 Загружено {len(self.sent_titles)} заголовков")
-        logger.info(f"📊 Загружено {len(self.sent_first_sentences)} первых предложений")
-        logger.info(f"📊 Загружено {len(self.posts_log)} записей в логе")
 
     def _debug_env_vars(self):
         """Отладка переменных окружения"""
@@ -261,10 +251,6 @@ class NewsBot:
     def calculate_title_similarity(self, title1, title2):
         """
         УЛУЧШЕННОЕ сравнение заголовков
-        Учитывает:
-        - Общие слова
-        - Порядок слов
-        - Длину
         """
         if not title1 or not title2:
             return 0
@@ -289,23 +275,66 @@ class NewsBot:
         # Вычисляем процент общих слов
         similarity = (len(common_words) / max(len(words1), len(words2))) * 100
         
-        # Учитываем длину (штраф за большую разницу в длине)
+        # Учитываем длину
         len_ratio = min(len(t1), len(t2)) / max(len(t1), len(t2))
         similarity = similarity * len_ratio
         
         return round(similarity, 2)
 
     async def load_telegram_titles_cache(self):
-        """Загружает ВСЕ заголовки из Telegram канала"""
+        """
+        ИСПРАВЛЕННЫЙ МЕТОД загрузки заголовков из Telegram
+        Использует get_chat_history (доступно в python-telegram-bot v20+)
+        """
         try:
-            logger.info("📚 Загрузка всех заголовков из Telegram...")
+            logger.info("📚 Загрузка заголовков из Telegram...")
             self.telegram_titles_cache = []
+            
+            # Получаем историю чата
+            messages = []
+            async for message in self.bot.get_chat_history(chat_id=CHANNEL_ID, limit=100):
+                messages.append(message)
+            
+            logger.info(f"📨 Получено {len(messages)} сообщений")
+            
+            for message in messages:
+                # Извлекаем заголовок из caption или text
+                if message.caption:
+                    # Убираем HTML теги и берем первую строку
+                    clean_caption = re.sub(r'<[^>]+>', '', message.caption)
+                    title = clean_caption.split('\n')[0].strip()
+                elif message.text:
+                    clean_text = re.sub(r'<[^>]+>', '', message.text)
+                    title = clean_text.split('\n')[0].strip()
+                else:
+                    continue
+                
+                if title and len(title) > 10:
+                    self.telegram_titles_cache.append(title)
+            
+            logger.info(f"✅ Загружено {len(self.telegram_titles_cache)} заголовков")
+            
+            # Показываем первые 5 для проверки
+            if self.telegram_titles_cache:
+                logger.info("📋 Примеры заголовков:")
+                for i, t in enumerate(self.telegram_titles_cache[:5]):
+                    logger.info(f"   {i+1}. {t[:70]}...")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки заголовков: {e}")
+            # Пробуем альтернативный метод
+            await self._load_telegram_titles_alternative()
+
+    async def _load_telegram_titles_alternative(self):
+        """Альтернативный метод через get_updates"""
+        try:
+            logger.info("📚 Альтернативная загрузка заголовков...")
             
             offset = 0
             limit = 100
-            total_loaded = 0
+            total = 0
             
-            while True:
+            while total < 200:  # Максимум 200 сообщений
                 updates = await self.bot.get_updates(offset=offset, limit=limit, timeout=30)
                 
                 if not updates:
@@ -314,66 +343,41 @@ class NewsBot:
                 for update in updates:
                     offset = update.update_id + 1
                     
-                    # Проверяем сообщения из канала
-                    if update.channel_post and str(update.channel_post.chat_id) in CHANNEL_ID:
-                        message = update.channel_post
+                    # Проверяем channel_post
+                    if update.channel_post:
+                        msg = update.channel_post
                         
-                        # Извлекаем заголовок (первая строка без HTML)
-                        if message.caption:
-                            title = re.sub(r'<[^>]+>', '', message.caption.split('\n')[0]).strip()
-                        elif message.text:
-                            title = re.sub(r'<[^>]+>', '', message.text.split('\n')[0]).strip()
+                        if msg.caption:
+                            clean = re.sub(r'<[^>]+>', '', msg.caption)
+                            title = clean.split('\n')[0].strip()
+                        elif msg.text:
+                            clean = re.sub(r'<[^>]+>', '', msg.text)
+                            title = clean.split('\n')[0].strip()
                         else:
                             continue
                         
                         if title and len(title) > 10:
                             self.telegram_titles_cache.append(title)
-                            total_loaded += 1
+                            total += 1
                 
-                # Небольшая пауза
                 await asyncio.sleep(0.5)
-            
-            logger.info(f"✅ Загружено {total_loaded} заголовков из Telegram")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки заголовков: {e}")
-            # Пробуем альтернативный метод
-            await self._load_telegram_titles_alternative()
-
-    async def _load_telegram_titles_alternative(self):
-        """Альтернативный метод загрузки заголовков"""
-        try:
-            logger.info("📚 Альтернативная загрузка заголовков...")
-            
-            # Получаем информацию о канале
-            chat = await self.bot.get_chat(chat_id=CHANNEL_ID)
-            
-            # Пробуем получить последние сообщения через get_chat_history
-            if hasattr(self.bot, 'get_chat_history'):
-                async for message in self.bot.get_chat_history(chat_id=CHANNEL_ID, limit=200):
-                    if message.caption:
-                        title = re.sub(r'<[^>]+>', '', message.caption.split('\n')[0]).strip()
-                    elif message.text:
-                        title = re.sub(r'<[^>]+>', '', message.text.split('\n')[0]).strip()
-                    else:
-                        continue
-                    
-                    if title and len(title) > 10:
-                        self.telegram_titles_cache.append(title)
             
             logger.info(f"✅ Альтернативный метод загрузил {len(self.telegram_titles_cache)} заголовков")
             
         except Exception as e:
-            logger.error(f"❌ Альтернативный метод не сработал: {e}")
+            logger.error(f"❌ Альтернативный метод тоже не сработал: {e}")
 
     async def check_telegram_duplicate(self, new_title):
         """
         Проверяет заголовок на дубликат в Telegram
-        Возвращает (is_duplicate, max_similarity, matching_title)
         """
         if not self.telegram_titles_cache:
-            logger.warning("⚠️ Кэш заголовков пуст, пропускаю проверку")
-            return False, 0, ""
+            logger.warning("⚠️ Кэш заголовков пуст, загружаю...")
+            await self.load_telegram_titles_cache()
+            
+            if not self.telegram_titles_cache:
+                logger.warning("⚠️ Кэш всё ещё пуст, пропускаю проверку")
+                return False, 0, ""
         
         max_similarity = 0
         most_similar_title = ""
@@ -396,7 +400,7 @@ class NewsBot:
 
     def is_duplicate(self, article_data):
         """
-        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ (без Telegram)
+        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА (без Telegram)
         """
         url = article_data.get('link', '')
         title = article_data.get('title', '')
@@ -560,7 +564,7 @@ class NewsBot:
         text = text.replace('>', '&gt;')
         return text
 
-    # ========== ПАРСЕРЫ ИСТОЧНИКОВ ==========
+    # ========== ПАРСЕР AP NEWS ==========
     def get_apnews_articles_v2(self):
         """Парсинг AP News"""
         try:
@@ -773,7 +777,7 @@ class NewsBot:
                     }):
                         continue
                     
-                    # Переводим ДО проверки с Telegram
+                    # Переводим заголовок
                     logger.info("🔄 Перевод заголовка...")
                     title_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['title']
@@ -860,7 +864,7 @@ class NewsBot:
                     }):
                         continue
                     
-                    # Переводим ДО проверки с Telegram
+                    # Переводим заголовок
                     logger.info("🔄 Перевод заголовка...")
                     title_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['title']
@@ -1137,12 +1141,12 @@ class NewsBot:
             return False
 
     async def process_and_publish(self):
-        """Основной процесс: загрузка, проверка, публикация"""
+        """Основной процесс"""
         logger.info("=" * 60)
         logger.info(f"🔍 НАЧАЛО ЦИКЛА: {datetime.now()}")
         logger.info("=" * 60)
 
-        # 1. Загружаем свежие заголовки из Telegram
+        # 1. Загружаем заголовки из Telegram
         await self.load_telegram_titles_cache()
         
         # 2. Загружаем новые статьи
@@ -1156,7 +1160,7 @@ class NewsBot:
         self.post_queue.extend(news_items)
         logger.info(f"📦 В ОЧЕРЕДИ: {len(self.post_queue)} статей")
 
-        # 4. Публикуем если можно
+        # 4. Публикуем
         await self.try_publish_from_queue()
 
     async def try_publish_from_queue(self):
@@ -1176,7 +1180,6 @@ class NewsBot:
         logger.info(f"   Источник: {item['source']}")
         logger.info(f"   Осталось в очереди: {len(self.post_queue)}")
 
-        # Публикуем
         success = await self.publish_post(item)
         
         if success:
@@ -1184,7 +1187,7 @@ class NewsBot:
             self.mark_as_sent({
                 'link': item['link'],
                 'title': item['title_original'],
-                'content': item['content_ru']  # Для хеша используем переведенный текст
+                'content': item['content_ru']
             })
             self.log_post(item['link'], item['title_original'])
             
@@ -1192,10 +1195,9 @@ class NewsBot:
             logger.info(f"⏰ Следующая публикация через {next_delay//60} минут")
             asyncio.create_task(self._schedule_next_try(next_delay))
         else:
-            logger.error(f"❌ Не удалось опубликовать, возвращаем в очередь")
+            logger.error(f"❌ Не удалось опубликовать")
             self.post_queue.insert(0, item)
-            # Пробуем позже
-            asyncio.create_task(self._schedule_next_try(300))  # 5 минут
+            asyncio.create_task(self._schedule_next_try(300))
 
     async def _schedule_next_try(self, delay):
         """Планирует следующую попытку"""
@@ -1205,7 +1207,7 @@ class NewsBot:
     async def start(self):
         """Запускает бота"""
         logger.info("=" * 80)
-        logger.info("🚀 NEWS BOT 13.0 - 5 УРОВНЕЙ ЗАЩИТЫ")
+        logger.info("🚀 NEWS BOT 13.1 - 5 УРОВНЕЙ ЗАЩИТЫ")
         logger.info("=" * 80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Интервал: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
