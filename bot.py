@@ -1,7 +1,6 @@
 """
-🤖 Telegram News Bot - Версия 13.1
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (5 УРОВНЕЙ) + 9111.RU
-ИСПРАВЛЕНА ЗАГРУЗКА ЗАГОЛОВКОВ ИЗ TELEGRAM
+🤖 Telegram News Bot - Версия 13.2
+ИСПРАВЛЕНО: отображение заголовка вместо {{title}}
 """
 
 import os
@@ -282,10 +281,7 @@ class NewsBot:
         return round(similarity, 2)
 
     async def load_telegram_titles_cache(self):
-        """
-        ИСПРАВЛЕННЫЙ МЕТОД загрузки заголовков из Telegram
-        Использует get_chat_history (доступно в python-telegram-bot v20+)
-        """
+        """Загружает заголовки из Telegram"""
         try:
             logger.info("📚 Загрузка заголовков из Telegram...")
             self.telegram_titles_cache = []
@@ -298,9 +294,8 @@ class NewsBot:
             logger.info(f"📨 Получено {len(messages)} сообщений")
             
             for message in messages:
-                # Извлекаем заголовок из caption или text
+                # Извлекаем заголовок
                 if message.caption:
-                    # Убираем HTML теги и берем первую строку
                     clean_caption = re.sub(r'<[^>]+>', '', message.caption)
                     title = clean_caption.split('\n')[0].strip()
                 elif message.text:
@@ -309,12 +304,12 @@ class NewsBot:
                 else:
                     continue
                 
-                if title and len(title) > 10:
+                if title and len(title) > 10 and '{{title}}' not in title:
                     self.telegram_titles_cache.append(title)
             
             logger.info(f"✅ Загружено {len(self.telegram_titles_cache)} заголовков")
             
-            # Показываем первые 5 для проверки
+            # Показываем первые 5
             if self.telegram_titles_cache:
                 logger.info("📋 Примеры заголовков:")
                 for i, t in enumerate(self.telegram_titles_cache[:5]):
@@ -322,50 +317,6 @@ class NewsBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки заголовков: {e}")
-            # Пробуем альтернативный метод
-            await self._load_telegram_titles_alternative()
-
-    async def _load_telegram_titles_alternative(self):
-        """Альтернативный метод через get_updates"""
-        try:
-            logger.info("📚 Альтернативная загрузка заголовков...")
-            
-            offset = 0
-            limit = 100
-            total = 0
-            
-            while total < 200:  # Максимум 200 сообщений
-                updates = await self.bot.get_updates(offset=offset, limit=limit, timeout=30)
-                
-                if not updates:
-                    break
-                
-                for update in updates:
-                    offset = update.update_id + 1
-                    
-                    # Проверяем channel_post
-                    if update.channel_post:
-                        msg = update.channel_post
-                        
-                        if msg.caption:
-                            clean = re.sub(r'<[^>]+>', '', msg.caption)
-                            title = clean.split('\n')[0].strip()
-                        elif msg.text:
-                            clean = re.sub(r'<[^>]+>', '', msg.text)
-                            title = clean.split('\n')[0].strip()
-                        else:
-                            continue
-                        
-                        if title and len(title) > 10:
-                            self.telegram_titles_cache.append(title)
-                            total += 1
-                
-                await asyncio.sleep(0.5)
-            
-            logger.info(f"✅ Альтернативный метод загрузил {len(self.telegram_titles_cache)} заголовков")
-            
-        except Exception as e:
-            logger.error(f"❌ Альтернативный метод тоже не сработал: {e}")
 
     async def check_telegram_duplicate(self, new_title):
         """
@@ -400,7 +351,7 @@ class NewsBot:
 
     def is_duplicate(self, article_data):
         """
-        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА (без Telegram)
+        ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА
         """
         url = article_data.get('link', '')
         title = article_data.get('title', '')
@@ -557,6 +508,7 @@ class NewsBot:
         return text.strip()
 
     def escape_html_for_telegram(self, text):
+        """Экранирует HTML спецсимволы для Telegram"""
         if not text:
             return ""
         text = text.replace('&', '&amp;')
@@ -769,7 +721,7 @@ class NewsBot:
                 )
 
                 if article_data:
-                    # Проверка на дубликат (первые 4 уровня)
+                    # Проверка на дубликат
                     if self.is_duplicate({
                         'link': url,
                         'title': article_data['title'],
@@ -824,7 +776,6 @@ class NewsBot:
             parser_name = feed_config.get('parser', 'infobrics')
             priority = feed_config.get('priority', 5)
 
-            # Выбираем парсер
             if parser_name == 'infobrics':
                 parser_func = self.parse_infobrics
             elif parser_name == 'globalresearch':
@@ -844,7 +795,6 @@ class NewsBot:
                 link = entry.get('link', '')
                 title = entry.get('title', 'Без заголовка')
 
-                # Проверка по URL
                 if link in self.sent_links:
                     logger.info(f"⏭️ УЖЕ БЫЛО (URL): {title[:50]}...")
                     continue
@@ -856,7 +806,6 @@ class NewsBot:
                 )
 
                 if article_data:
-                    # Проверка на дубликат (первые 4 уровня)
                     if self.is_duplicate({
                         'link': link,
                         'title': article_data['title'],
@@ -864,19 +813,16 @@ class NewsBot:
                     }):
                         continue
                     
-                    # Переводим заголовок
                     logger.info("🔄 Перевод заголовка...")
                     title_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['title']
                     )
                     
-                    # Проверяем с заголовками из Telegram
                     is_dup, similarity, matching = await self.check_telegram_duplicate(title_ru)
                     if is_dup:
                         logger.warning(f"⏭️ ДУБЛИКАТ в Telegram ({similarity}%): {title_ru[:50]}...")
                         continue
                     
-                    # Переводим текст
                     logger.info(f"🔄 Перевод текста ({len(article_data['content'])} символов)...")
                     content_ru = await asyncio.get_event_loop().run_in_executor(
                         None, self.translate_text, article_data['content']
@@ -962,20 +908,34 @@ class NewsBot:
             logger.error(f"❌ Ошибка перевода: {e}")
             return text
 
+    # ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМИРОВАНИЯ ПОСТА ==========
     def build_caption(self, title, content, max_length=TELEGRAM_MAX_CAPTION):
-        """Формирует подпись для Telegram"""
-        title_part = f"<b>{title}</b>"
+        """
+        ФОРМИРУЕТ ПОДПИСЬ ДЛЯ TELEGRAM
+        Гарантирует, что заголовок отображается правильно
+        """
+        # Экранируем HTML
+        title_escaped = self.escape_html_for_telegram(title)
+        content_escaped = self.escape_html_for_telegram(content)
         
-        if len(title_part) + len(content) + 10 <= max_length:
-            return f"{title_part}\n\n{content}"
+        # Формируем заголовок с HTML тегами
+        title_part = f"<b>{title_escaped}</b>"
         
-        # Обрезаем контент
-        available = max_length - len(title_part) - 10
-        if available > 100:
-            truncated = content[:available] + "..."
-            return f"{title_part}\n\n{truncated}"
+        # Проверяем длину
+        total_len = len(title_part) + len(content_escaped) + 10
+        
+        if total_len <= max_length:
+            # Всё помещается
+            return f"{title_part}\n\n{content_escaped}"
         else:
-            return title_part
+            # Нужно обрезать
+            available = max_length - len(title_part) - 10
+            if available > 100:
+                truncated = content_escaped[:available] + "..."
+                return f"{title_part}\n\n{truncated}"
+            else:
+                # Если совсем мало места, публикуем только заголовок
+                return title_part
 
     # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
     def publish_to_9111(self, title, content, source_url):
@@ -1079,8 +1039,11 @@ class NewsBot:
     async def publish_post(self, post_data):
         """Публикует пост в Telegram и на 9111.ru"""
         try:
-            # Публикация в Telegram
+            # ИСПОЛЬЗУЕМ ИСПРАВЛЕННУЮ ФУНКЦИЮ build_caption
             caption = self.build_caption(post_data['title_ru'], post_data['content_ru'])
+            
+            # Логируем для проверки
+            logger.info(f"📝 Формирую пост с заголовком: {post_data['title_ru'][:50]}...")
             
             if post_data['main_image']:
                 image_path = await self.download_image(post_data['main_image'])
@@ -1207,7 +1170,7 @@ class NewsBot:
     async def start(self):
         """Запускает бота"""
         logger.info("=" * 80)
-        logger.info("🚀 NEWS BOT 13.1 - 5 УРОВНЕЙ ЗАЩИТЫ")
+        logger.info("🚀 NEWS BOT 13.2 - ИСПРАВЛЕНО ОТОБРАЖЕНИЕ ЗАГОЛОВКА")
         logger.info("=" * 80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Интервал: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
