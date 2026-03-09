@@ -1,7 +1,12 @@
 """
-🤖 Telegram News Bot - Версия 11.6
-АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (4 УРОВНЯ) + 9111.RU
-- Расширенная отладка публикации на 9111.ru
+🤖 Telegram News Bot - Версия 12.0
+АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (5 УРОВНЕЙ) + 9111.RU
+- Уровень 1: Проверка по URL
+- Уровень 2: Проверка по нормализованному заголовку
+- Уровень 3: Проверка по хешу содержимого
+- Уровень 4: Проверка по первому предложению
+- Уровень 5: Проверка по схожести заголовков (75%) с историей Telegram
+- Исправлена публикация на 9111.ru (передача cookies)
 - Сохранение скриншотов и HTML для анализа
 """
 
@@ -136,6 +141,9 @@ class NewsBot:
         self.session = None
         self.last_post_time = None
         self.post_queue = []
+        
+        # Кэш заголовков из Telegram (для проверки дубликатов)
+        self.telegram_titles_cache = []
         
         # Проверяем наличие Chrome для 9111.ru
         self.chrome_path = self._find_chrome()
@@ -291,27 +299,118 @@ class NewsBot:
         
         return first_sentence
 
+    def calculate_title_similarity(self, title1, title2):
+        """
+        Вычисляет процент схожести двух заголовков.
+        Использует расстояние Левенштейна для сравнения.
+        """
+        if not title1 or not title2:
+            return 0
+        
+        # Приводим к нижнему регистру и убираем лишние пробелы
+        t1 = ' '.join(title1.lower().split())
+        t2 = ' '.join(title2.lower().split())
+        
+        # Если заголовки идентичны, сразу возвращаем 100
+        if t1 == t2:
+            return 100.0
+        
+        # Вычисляем расстояние Левенштейна
+        def levenshtein_distance(s1, s2):
+            if len(s1) < len(s2):
+                return levenshtein_distance(s2, s1)
+            if len(s2) == 0:
+                return len(s1)
+            previous_row = range(len(s2) + 1)
+            for i, c1 in enumerate(s1):
+                current_row = [i + 1]
+                for j, c2 in enumerate(s2):
+                    insertions = previous_row[j + 1] + 1
+                    deletions = current_row[j] + 1
+                    substitutions = previous_row[j] + (c1 != c2)
+                    current_row.append(min(insertions, deletions, substitutions))
+                previous_row = current_row
+            return previous_row[-1]
+        
+        distance = levenshtein_distance(t1, t2)
+        max_len = max(len(t1), len(t2))
+        if max_len == 0:
+            return 0
+        
+        similarity = (1 - distance / max_len) * 100
+        return round(similarity, 2)
+
+    async def load_telegram_titles_cache(self):
+        """Загружает заголовки последних постов из Telegram в кэш"""
+        try:
+            logger.info("📚 Загрузка заголовков из Telegram в кэш...")
+            self.telegram_titles_cache = []
+            
+            async for message in self.bot.get_chat_history(chat_id=CHANNEL_ID, limit=100):
+                if message.caption:  # Если пост с фото
+                    # Извлекаем заголовок (первая строка, убираем HTML теги)
+                    caption_lines = message.caption.split('\n')
+                    if caption_lines:
+                        title = re.sub(r'<[^>]+>', '', caption_lines[0]).strip()
+                        if title:
+                            self.telegram_titles_cache.append(title)
+                elif message.text:   # Если просто текст
+                    text_lines = message.text.split('\n')
+                    if text_lines:
+                        title = re.sub(r'<[^>]+>', '', text_lines[0]).strip()
+                        if title:
+                            self.telegram_titles_cache.append(title)
+            
+            logger.info(f"✅ Загружено {len(self.telegram_titles_cache)} заголовков")
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки заголовков из Telegram: {e}")
+
+    def check_telegram_duplicate(self, new_title):
+        """Проверяет, нет ли похожего заголовка в кэше Telegram"""
+        if not self.telegram_titles_cache:
+            return False, 0
+        
+        for existing_title in self.telegram_titles_cache:
+            similarity = self.calculate_title_similarity(new_title, existing_title)
+            if similarity >= 75:
+                logger.info(f"⏭️ ДУБЛИКАТ (Telegram заголовок {similarity}%): {new_title[:50]}...")
+                logger.info(f"   с существующим: {existing_title[:50]}...")
+                return True, similarity
+        
+        return False, 0
+
     def is_duplicate(self, article_data):
-        """ЧЕТЫРЁХУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ"""
+        """
+        ПЯТИУРОВНЕВАЯ ПРОВЕРКА НА ДУБЛИКАТ:
+        1. Проверка по URL
+        2. Проверка по нормализованному заголовку
+        3. Проверка по хешу содержимого
+        4. Проверка по первому предложению
+        5. Проверка по схожести заголовков (75%) с историей Telegram
+        """
         url = article_data.get('link', '')
         title = article_data.get('title', '')
         content = article_data.get('content', '')
         
+        # Уровень 1: Проверка по URL
         if url in self.sent_links:
             logger.info(f"⏭️ ДУБЛИКАТ (URL): {title[:50]}...")
             return True
         
+        # Уровень 2: Проверка по нормализованному заголовку
         norm_title = self.normalize_title(title)
         if norm_title and norm_title in self.sent_titles:
             logger.info(f"⏭️ ДУБЛИКАТ (заголовок): {title[:50]}...")
             return True
         
+        # Уровень 3: Проверка по хешу содержимого
         if content:
             content_hash = self.create_content_hash(content)
             if content_hash and content_hash in self.sent_hashes:
                 logger.info(f"⏭️ ДУБЛИКАТ (содержимое): {title[:50]}...")
                 return True
         
+        # Уровень 4: Проверка по первому предложению
         if content:
             first_sentence = self.extract_first_sentence(content)
             if first_sentence and len(first_sentence) > 20:
@@ -1045,7 +1144,7 @@ class NewsBot:
     # ========== ПУБЛИКАЦИЯ НА 9111.RU (С РАСШИРЕННОЙ ОТЛАДКОЙ) ==========
     def publish_to_9111(self, title, content, source_url):
         """
-        Публикация статьи на 9111.ru через Selenium с расширенной отладкой
+        Публикация статьи на 9111.ru через Selenium с передачей cookies в requests
         """
         if not self.ninth_available:
             logger.warning("⚠️ 9111.ru недоступен (нет Chrome или данных для входа)")
@@ -1053,6 +1152,7 @@ class NewsBot:
         
         driver = None
         timestamp = int(time.time())
+        session = requests.Session()
         
         try:
             logger.info("=" * 60)
@@ -1152,115 +1252,85 @@ class NewsBot:
                     f.write(driver.page_source)
                 return False
             
-            # 4. Заполняем заголовок
-            logger.info("4️⃣ Заполнение заголовка...")
-            try:
-                title_div = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "topic_name"))
-                )
-                title_div.click()
-                driver.execute_script("arguments[0].innerHTML = '';", title_div)
-                
-                short_title = title[:150]
-                title_div.send_keys(short_title)
-                logger.info(f"   Заголовок вставлен: {short_title[:50]}...")
-                
-                # Проверяем счётчик
-                try:
-                    counter = driver.find_element(By.CLASS_NAME, "lebel_header_cnt")
-                    logger.info(f"   Счётчик заголовка: {counter.text}")
-                except:
-                    pass
-            except Exception as e:
-                logger.error(f"❌ Ошибка при заполнении заголовка: {e}")
-                driver.save_screenshot(f"debug_9111_title_error_{timestamp}.png")
-                return False
+            # 4. Извлекаем cookies из Selenium
+            logger.info("🍪 Извлечение cookies для requests...")
+            selenium_cookies = driver.get_cookies()
+            for cookie in selenium_cookies:
+                session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain', '.9111.ru'))
             
-            # 5. Выбираем рубрику
-            logger.info("5️⃣ Выбор рубрики...")
-            try:
-                rubric_select = driver.find_element(By.ID, "rubric_id2")
-                options = rubric_select.find_elements(By.TAG_NAME, "option")
-                logger.info(f"   Найдено рубрик: {len(options)}")
-                
-                rubric_found = False
-                for option in options:
-                    if "Новости" in option.text:
-                        option.click()
-                        logger.info(f"✅ Выбрана рубрика: {option.text}")
-                        rubric_found = True
-                        break
-                
-                if not rubric_found:
-                    logger.warning("   Рубрика 'Новости' не найдена, выбираю первую")
-                    if options:
-                        options[0].click()
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось выбрать рубрику: {e}")
+            # Добавляем необходимые заголовки
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Origin': 'https://www.9111.ru',
+                'Referer': 'https://www.9111.ru/pubs/add/title/',
+            })
             
-            # 6. Заполняем текст
-            logger.info("6️⃣ Заполнение текста...")
-            try:
-                text_div = driver.find_element(By.ID, "lite_editor")
-                full_text = f"{content}\n\nИсточник: {source_url}"
-                
-                if len(full_text) > 5000:
-                    full_text = full_text[:5000] + "..."
-                    logger.info(f"   Текст обрезан до 5000 символов")
-                
-                driver.execute_script("arguments[0].innerHTML = arguments[1];", text_div, full_text.replace('\n', '<br>'))
-                logger.info(f"   Текст вставлен, длина: {len(full_text)} символов")
-                
-                # Проверяем счётчик
-                try:
-                    content_cnt = driver.find_element(By.ID, "content_cnt")
-                    logger.info(f"   Счётчик текста: {content_cnt.text}")
-                except:
-                    pass
-            except Exception as e:
-                logger.error(f"❌ Ошибка при заполнении текста: {e}")
-                driver.save_screenshot(f"debug_9111_text_error_{timestamp}.png")
-                return False
+            # 5. Подготавливаем данные для отправки
+            logger.info("5️⃣ Подготовка данных для отправки...")
             
-            # 7. Добавляем теги
-            logger.info("7️⃣ Добавление тегов...")
-            try:
-                tags_input = driver.find_element(By.ID, "tag_list_input")
-                tags_input.send_keys("новости, политика, экономика")
-                logger.info("   Теги добавлены")
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось добавить теги: {e}")
+            # Получаем необходимые параметры из страницы (токены и т.д.)
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
             
-            # Сохраняем скриншот перед отправкой
-            driver.save_screenshot(f"debug_9111_before_submit_{timestamp}.png")
-            time.sleep(2)
+            # Ищем CSRF токен если есть
+            csrf_token = None
+            csrf_input = soup.find('input', {'name': 'csrf_token'})
+            if csrf_input:
+                csrf_token = csrf_input.get('value')
             
-            # 8. Отправляем
-            logger.info("8️⃣ Отправка формы...")
-            try:
-                publish_btn = driver.find_element(By.ID, "button_create_pubs")
-                publish_btn.click()
-                logger.info("   Кнопка нажата")
-                time.sleep(5)
-                
-                # Сохраняем скриншот после отправки
-                driver.save_screenshot(f"debug_9111_after_submit_{timestamp}.png")
-                
-                # Проверяем результат
-                page_source = driver.page_source
-                if "Спасибо" in page_source or "опубликована" in page_source or "успешно" in page_source.lower():
-                    logger.info("✅ Статья успешно опубликована на 9111.ru")
+            # Определяем URL для отправки формы
+            form = soup.find('form', {'id': 'form_create_topic_group'})
+            if form and form.get('action'):
+                post_url = form['action']
+                if not post_url.startswith('http'):
+                    post_url = 'https://www.9111.ru' + post_url
+            else:
+                post_url = 'https://www.9111.ru/pubs/add/title/'
+            
+            logger.info(f"   URL отправки: {post_url}")
+            
+            # Формируем данные формы
+            form_data = {
+                'topic_name': title[:150],  # Заголовок
+                'rubric_id': '382235',  # ID рубрики "Новости"
+                'tag_list_input': 'новости, политика, экономика',  # Теги
+                'title_tags': 'новости, политика, экономика',
+                'title_private': 'off',  # Не отложенная публикация
+            }
+            
+            # Добавляем CSRF токен если есть
+            if csrf_token:
+                form_data['csrf_token'] = csrf_token
+            
+            # Текст публикации
+            full_text = f"{content}\n\nИсточник: {source_url}"
+            if len(full_text) > 5000:
+                full_text = full_text[:5000] + "..."
+            
+            form_data['komm'] = full_text
+            
+            # 6. Отправляем POST запрос
+            logger.info("6️⃣ Отправка POST запроса...")
+            response = session.post(post_url, data=form_data, allow_redirects=True, timeout=30)
+            
+            logger.info(f"   Статус ответа: {response.status_code}")
+            logger.info(f"   URL после редиректа: {response.url}")
+            
+            # Сохраняем ответ для анализа
+            with open(f"debug_9111_response_{timestamp}.html", 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            
+            # 7. Проверяем результат
+            if response.status_code == 200:
+                if "Спасибо" in response.text or "опубликована" in response.text or "успешно" in response.text.lower():
+                    logger.info(f"✅ Статья успешно опубликована на 9111.ru")
                     return True
                 else:
-                    logger.warning("⚠️ Результат публикации неясен")
-                    logger.info("   Сохраняю HTML для анализа")
-                    with open(f"debug_9111_result_{timestamp}.html", 'w', encoding='utf-8') as f:
-                        f.write(page_source)
+                    logger.warning("⚠️ Статья отправлена, но ответ неясен")
                     return True
-                    
-            except Exception as e:
-                logger.error(f"❌ Ошибка при отправке формы: {e}")
-                driver.save_screenshot(f"debug_9111_submit_error_{timestamp}.png")
+            else:
+                logger.error(f"❌ Ошибка HTTP {response.status_code} при отправке")
                 return False
             
         except Exception as e:
@@ -1321,6 +1391,14 @@ class NewsBot:
 
     async def publish_post(self, post_data, original_item):
         try:
+            # Уровень 5: Проверка по схожести заголовков с Telegram
+            logger.info("🔍 Проверка заголовка на дубликат в Telegram (75% схожести)...")
+            is_dup, similarity = self.check_telegram_duplicate(post_data['title_ru'])
+            if is_dup:
+                logger.warning(f"⏭️ ПРОПУСК: заголовок совпадает на {similarity}% с существующим")
+                return False
+
+            # Публикация в Telegram
             if post_data['image_path']:
                 with open(post_data['image_path'], 'rb') as photo:
                     await self.bot.send_photo(
@@ -1342,6 +1420,12 @@ class NewsBot:
                 )
                 logger.info("✅ Пост в Telegram опубликован")
 
+            # Обновляем кэш заголовков
+            self.telegram_titles_cache.append(post_data['title_ru'])
+            if len(self.telegram_titles_cache) > 100:
+                self.telegram_titles_cache = self.telegram_titles_cache[-100:]
+
+            # Публикация на 9111.ru
             if self.ninth_available:
                 logger.info("🔄 Начинаю публикацию на 9111.ru...")
                 loop = asyncio.get_event_loop()
@@ -1378,6 +1462,9 @@ class NewsBot:
         logger.info("="*60)
         logger.info(f"🔍 ПРОВЕРКА: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("="*60)
+
+        # Загружаем свежие заголовки из Telegram
+        await self.load_telegram_titles_cache()
 
         news_items = await self.fetch_all_news()
         
@@ -1429,17 +1516,18 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 11.6 - 4 УРОВНЯ ЗАЩИТЫ + 9111.RU (С ОТЛАДКОЙ)")
+        logger.info("🚀 NEWS BOT 12.0 - 5 УРОВНЕЙ ЗАЩИТЫ + 9111.RU")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
         logger.info(f"🛡️ Лимит: {MAX_POSTS_PER_DAY} постов/день")
         logger.info(f"🌍 Часовой пояс: UTC+{TIMEZONE_OFFSET}")
-        logger.info(f"🔒 Защита от дублей (4 уровня):")
+        logger.info(f"🔒 Защита от дублей (5 уровней):")
         logger.info(f"   - URL: {len(self.sent_links)}")
         logger.info(f"   - Заголовки: {len(self.sent_titles)}")
         logger.info(f"   - Хеши: {len(self.sent_hashes)}")
         logger.info(f"   - Первые предложения: {len(self.sent_first_sentences)}")
+        logger.info(f"   - Telegram заголовки (75% схожести)")
         logger.info(f"🌐 9111.ru: {'✅ ДОСТУПЕН' if self.ninth_available else '❌ НЕДОСТУПЕН'}")
         logger.info("="*80)
 
