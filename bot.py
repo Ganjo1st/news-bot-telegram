@@ -1,11 +1,10 @@
 """
-🤖 Telegram News Bot - Версия 15.1
+🤖 Telegram News Bot - Версия 16.0
 АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (5 УРОВНЕЙ) + 9111.RU
 ИСПРАВЛЕНЫ:
-- Загрузка заголовков из Telegram (через get_updates)
-- Хронологический порядок публикации
-- Нет многоточий в обрезанных текстах
-- Убраны синтаксические ошибки
+- Загрузка заголовков из Telegram
+- Убрана ссылка на источник в конце
+- Полная диагностика 9111.ru
 """
 
 import os
@@ -140,9 +139,6 @@ class NewsBot:
         
         # Кэш заголовков из Telegram
         self.telegram_titles_cache = []
-        
-        # ID последнего обработанного сообщения
-        self.last_update_id = 0
         
         # Проверяем наличие Chrome
         self.chrome_path = self._find_chrome()
@@ -290,34 +286,26 @@ class NewsBot:
 
     async def load_telegram_titles_cache(self):
         """
-        Загрузка заголовков из Telegram через get_updates
-        Работает в любой версии python-telegram-bot
+        Загрузка заголовков из Telegram
         """
         try:
             logger.info("📚 Загрузка заголовков из Telegram...")
             self.telegram_titles_cache = []
             
-            offset = 0
-            limit = 100
-            total = 0
-            max_messages = 200  # Максимум сообщений для загрузки
-            
-            while total < max_messages:
-                updates = await self.bot.get_updates(offset=offset, limit=limit, timeout=30)
+            # Пробуем получить историю чата
+            try:
+                # Сначала проверяем, есть ли доступ к каналу
+                chat = await self.bot.get_chat(chat_id=CHANNEL_ID)
+                logger.info(f"📢 Канал: {chat.title}")
                 
-                if not updates:
-                    break
+                # Пробуем получить последние сообщения
+                updates = await self.bot.get_updates(timeout=30, limit=100)
                 
                 for update in updates:
-                    offset = update.update_id + 1
-                    
-                    # Проверяем channel_post
-                    if update.channel_post:
+                    if update.channel_post and str(update.channel_post.chat_id) in CHANNEL_ID:
                         msg = update.channel_post
                         
-                        # Извлекаем заголовок
                         if msg.caption:
-                            # Убираем HTML теги
                             clean = re.sub(r'<[^>]+>', '', msg.caption)
                             title = clean.split('\n')[0].strip()
                         elif msg.text:
@@ -328,26 +316,29 @@ class NewsBot:
                         
                         if title and len(title) > 10:
                             self.telegram_titles_cache.append(title)
-                            total += 1
                 
-                # Небольшая пауза
-                await asyncio.sleep(0.5)
-            
-            # Сохраняем последний ID для будущих проверок
-            if updates:
-                self.last_update_id = updates[-1].update_id
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось получить историю: {e}")
+                # Пробуем альтернативный метод - читаем из файла
+                await self._load_titles_from_file()
             
             logger.info(f"✅ Загружено {len(self.telegram_titles_cache)} заголовков")
             
-            # Показываем первые 5 для проверки
-            if self.telegram_titles_cache:
-                logger.info("📋 Примеры заголовков:")
-                for i, t in enumerate(self.telegram_titles_cache[:5]):
-                    logger.info(f"   {i+1}. {t[:70]}...")
-            
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки заголовков: {e}")
-            # Не прерываем работу бота, просто продолжаем без кэша
+
+    async def _load_titles_from_file(self):
+        """Загрузка заголовков из файла лога"""
+        try:
+            if os.path.exists(POSTS_LOG_FILE):
+                with open(POSTS_LOG_FILE, 'r', encoding='utf-8') as f:
+                    posts = json.load(f)
+                    for post in posts[-50:]:  # последние 50
+                        if 'title' in post:
+                            self.telegram_titles_cache.append(post['title'])
+                logger.info(f"📁 Загружено {len(self.telegram_titles_cache)} заголовков из файла")
+        except:
+            pass
 
     async def check_telegram_duplicate(self, new_title):
         """
@@ -357,7 +348,7 @@ class NewsBot:
             await self.load_telegram_titles_cache()
             
             if not self.telegram_titles_cache:
-                logger.warning("⚠️ Кэш заголовков пуст, пропускаю проверку")
+                logger.warning("⚠️ Кэш заголовков пуст")
                 return False, 0
         
         max_similarity = 0
@@ -938,7 +929,6 @@ class NewsBot:
     def truncate_text_by_sentences(self, text, max_length):
         """
         Обрезает текст по предложениям, не превышая max_length
-        БЕЗ МНОГОТОЧИЯ В КОНЦЕ
         """
         if len(text) <= max_length:
             return text
@@ -963,9 +953,9 @@ class NewsBot:
         
         return ''.join(result)
 
-    def format_telegram_post(self, title, content, source_url, source_name):
+    def format_telegram_post(self, title, content):
         """
-        Форматирует пост для Telegram
+        Форматирует пост для Telegram БЕЗ ССЫЛКИ НА ИСТОЧНИК
         """
         # Экранируем HTML
         title_escaped = self.escape_html_for_telegram(title)
@@ -975,14 +965,11 @@ class NewsBot:
         header = f"<b>{title_escaped}</b>"
         
         # Обрезаем контент если нужно
-        max_content_length = TELEGRAM_MAX_CAPTION - len(header) - 50
+        max_content_length = TELEGRAM_MAX_CAPTION - len(header) - 10
         if len(content_escaped) > max_content_length:
             content_escaped = self.truncate_text_by_sentences(content_escaped, max_content_length)
         
-        # Добавляем ссылку на источник
-        footer = f"\n\n🔗 <a href='{source_url}'>Источник: {source_name}</a>"
-        
-        return f"{header}\n\n{content_escaped}{footer}"
+        return f"{header}\n\n{content_escaped}"
 
     # ========== ПУБЛИКАЦИЯ В TELEGRAM ==========
     async def publish_to_telegram(self, post_data):
@@ -991,9 +978,7 @@ class NewsBot:
             # Форматируем пост
             caption = self.format_telegram_post(
                 post_data['title_ru'],
-                post_data['content_ru'],
-                post_data['link'],
-                post_data['source']
+                post_data['content_ru']
             )
             
             # Публикуем с изображением или без
@@ -1047,7 +1032,7 @@ class NewsBot:
 
     # ========== ПУБЛИКАЦИЯ НА 9111.RU ==========
     def publish_to_9111(self, title, content, source_url):
-        """Публикация на 9111.ru"""
+        """Публикация на 9111.ru с полной диагностикой"""
         if not self.ninth_available:
             logger.warning("⚠️ 9111.ru недоступен")
             return False
@@ -1058,6 +1043,9 @@ class NewsBot:
         try:
             logger.info("=" * 60)
             logger.info("🌐 ПУБЛИКАЦИЯ НА 9111.RU")
+            logger.info(f"📧 Email: {NINTH_EMAIL}")
+            logger.info(f"📝 Заголовок: {title[:50]}...")
+            logger.info(f"📄 Текст: {len(content)} символов")
             
             options = Options()
             options.add_argument("--headless=new")
@@ -1065,13 +1053,15 @@ class NewsBot:
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-gpu")
             options.add_argument("--window-size=1920,1080")
-            options.binary_location = self.chrome_path
-            
-            # Добавляем аргументы для стабильности
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
+            options.binary_location = self.chrome_path
             
+            # Добавляем user-agent
+            options.add_argument("user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            
+            logger.info("🔄 Запуск Chrome...")
             driver = webdriver.Chrome(options=options)
             driver.set_page_load_timeout(45)
             
@@ -1079,104 +1069,170 @@ class NewsBot:
             logger.info("1️⃣ Переход на главную...")
             driver.get("https://www.9111.ru")
             time.sleep(3)
+            logger.info(f"   Заголовок страницы: {driver.title}")
+            logger.info(f"   URL: {driver.current_url}")
             
-            # 2. Авторизация
-            logger.info("2️⃣ Авторизация...")
-            try:
-                if "Вход" in driver.page_source:
-                    login_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Вход")
-                    login_link.click()
-                    time.sleep(2)
-                    
-                    email_input = WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.NAME, "email"))
-                    )
-                    email_input.clear()
-                    email_input.send_keys(NINTH_EMAIL)
-                    
-                    pass_input = driver.find_element(By.NAME, "pass")
-                    pass_input.clear()
-                    pass_input.send_keys(NINTH_PASSWORD)
-                    
-                    submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
-                    submit_btn.click()
-                    time.sleep(3)
-                    logger.info("✅ Авторизация выполнена")
-                else:
-                    logger.info("✅ Уже авторизованы")
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка авторизации: {e}")
+            # Сохраняем скриншот
+            driver.save_screenshot(f"debug_9111_main_{timestamp}.png")
             
-            # 3. Переход к созданию
-            logger.info("3️⃣ Переход к созданию...")
+            # 2. Проверка авторизации
+            logger.info("2️⃣ Проверка авторизации...")
+            page_source = driver.page_source
+            
+            if "Вход" in page_source:
+                logger.info("   Требуется авторизация")
+                try:
+                    # Ищем ссылку "Вход"
+                    login_links = driver.find_elements(By.PARTIAL_LINK_TEXT, "Вход")
+                    if login_links:
+                        logger.info(f"   Найдена ссылка: {login_links[0].text}")
+                        login_links[0].click()
+                        time.sleep(2)
+                        
+                        # Сохраняем скриншот формы
+                        driver.save_screenshot(f"debug_9111_login_{timestamp}.png")
+                        
+                        # Заполняем форму
+                        email_input = WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.NAME, "email"))
+                        )
+                        email_input.clear()
+                        email_input.send_keys(NINTH_EMAIL)
+                        logger.info("   Email введён")
+                        
+                        pass_input = driver.find_element(By.NAME, "pass")
+                        pass_input.clear()
+                        pass_input.send_keys(NINTH_PASSWORD)
+                        logger.info("   Пароль введён")
+                        
+                        # Нажимаем кнопку входа
+                        submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
+                        submit_btn.click()
+                        time.sleep(3)
+                        
+                        # Проверяем результат
+                        if "Вход" not in driver.page_source:
+                            logger.info("✅ Авторизация успешна")
+                        else:
+                            logger.warning("⚠️ Возможно, авторизация не удалась")
+                    else:
+                        logger.warning("⚠️ Ссылка 'Вход' не найдена")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка авторизации: {e}")
+                    driver.save_screenshot(f"debug_9111_auth_error_{timestamp}.png")
+            else:
+                logger.info("✅ Уже авторизованы")
+            
+            # 3. Переход к созданию публикации
+            logger.info("3️⃣ Переход к созданию публикации...")
             driver.get("https://www.9111.ru/pubs/add/title/")
             time.sleep(3)
             
-            # Сохраняем скриншот
-            driver.save_screenshot(f"debug_9111_{timestamp}.png")
+            logger.info(f"   Текущий URL: {driver.current_url}")
+            driver.save_screenshot(f"debug_9111_add_{timestamp}.png")
             
-            # 4. Заголовок
-            logger.info("4️⃣ Заголовок...")
-            title_div = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "topic_name"))
-            )
-            title_div.click()
-            driver.execute_script("arguments[0].innerHTML = '';", title_div)
-            title_div.send_keys(title[:150])
-            time.sleep(1)
+            # Проверяем, что мы на нужной странице
+            if "pubs/add/title" not in driver.current_url:
+                logger.error(f"❌ Не удалось перейти на страницу создания")
+                logger.info(f"   Сохраняю HTML...")
+                with open(f"debug_9111_error_{timestamp}.html", 'w', encoding='utf-8') as f:
+                    f.write(driver.page_source)
+                return False
             
-            # 5. Рубрика
-            logger.info("5️⃣ Рубрика...")
+            # 4. Заполняем заголовок
+            logger.info("4️⃣ Заполнение заголовка...")
+            try:
+                title_div = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "topic_name"))
+                )
+                title_div.click()
+                driver.execute_script("arguments[0].innerHTML = '';", title_div)
+                title_div.send_keys(title[:150])
+                logger.info(f"   Заголовок вставлен: {title[:50]}...")
+            except Exception as e:
+                logger.error(f"❌ Ошибка заголовка: {e}")
+                driver.save_screenshot(f"debug_9111_title_error_{timestamp}.png")
+                return False
+            
+            # 5. Выбираем рубрику
+            logger.info("5️⃣ Выбор рубрики...")
             try:
                 rubric = driver.find_element(By.ID, "rubric_id2")
-                for option in rubric.find_elements(By.TAG_NAME, "option"):
+                options = rubric.find_elements(By.TAG_NAME, "option")
+                logger.info(f"   Найдено рубрик: {len(options)}")
+                
+                for option in options:
                     if "Новости" in option.text:
                         option.click()
                         logger.info(f"✅ Выбрано: {option.text}")
                         break
-            except:
-                logger.warning("⚠️ Рубрика не выбрана")
+                else:
+                    logger.warning("⚠️ Рубрика 'Новости' не найдена")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка выбора рубрики: {e}")
             
-            # 6. Текст
-            logger.info("6️⃣ Текст...")
-            text_div = driver.find_element(By.ID, "lite_editor")
-            full_text = f"{content}\n\nИсточник: {source_url}"
-            if len(full_text) > 5000:
-                full_text = full_text[:5000]
+            # 6. Заполняем текст
+            logger.info("6️⃣ Заполнение текста...")
+            try:
+                text_div = driver.find_element(By.ID, "lite_editor")
+                full_text = f"{content}\n\nИсточник: {source_url}"
+                if len(full_text) > 5000:
+                    full_text = full_text[:5000]
+                
+                driver.execute_script("arguments[0].innerHTML = arguments[1];", 
+                                     text_div, full_text.replace('\n', '<br>'))
+                logger.info(f"   Текст вставлен, длина: {len(full_text)}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка текста: {e}")
+                driver.save_screenshot(f"debug_9111_text_error_{timestamp}.png")
+                return False
             
-            # Вставляем текст
-            driver.execute_script("arguments[0].innerHTML = arguments[1];", 
-                                 text_div, full_text.replace('\n', '<br>'))
-            time.sleep(1)
-            
-            # 7. Теги
-            logger.info("7️⃣ Теги...")
+            # 7. Добавляем теги
+            logger.info("7️⃣ Добавление тегов...")
             try:
                 tags = driver.find_element(By.ID, "tag_list_input")
                 tags.send_keys("новости, политика, экономика")
-            except:
-                pass
+                logger.info("   Теги добавлены")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка тегов: {e}")
             
-            # 8. Отправка
-            logger.info("8️⃣ Отправка...")
-            publish_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.ID, "button_create_pubs"))
-            )
-            publish_btn.click()
-            time.sleep(5)
-            
-            logger.info("✅ Пост отправлен на 9111.ru")
-            return True
+            # 8. Отправляем
+            logger.info("8️⃣ Отправка формы...")
+            try:
+                publish_btn = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.ID, "button_create_pubs"))
+                )
+                publish_btn.click()
+                logger.info("   Кнопка нажата")
+                time.sleep(5)
+                
+                # Сохраняем результат
+                driver.save_screenshot(f"debug_9111_result_{timestamp}.png")
+                
+                # Проверяем результат
+                if "Спасибо" in driver.page_source or "опубликована" in driver.page_source:
+                    logger.info("✅ Статья опубликована на 9111.ru")
+                    return True
+                else:
+                    logger.warning("⚠️ Результат неясен, но ошибок нет")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки: {e}")
+                driver.save_screenshot(f"debug_9111_submit_error_{timestamp}.png")
+                return False
             
         except Exception as e:
-            logger.error(f"❌ Ошибка 9111.ru: {e}")
+            logger.error(f"❌ Критическая ошибка: {e}")
+            logger.error(traceback.format_exc())
             if driver:
-                driver.save_screenshot(f"error_9111_{timestamp}.png")
+                driver.save_screenshot(f"debug_9111_critical_{timestamp}.png")
             return False
             
         finally:
             if driver:
                 driver.quit()
+            logger.info("=" * 60)
 
     async def publish_post(self, post_data):
         """Публикует пост везде"""
@@ -1195,6 +1251,7 @@ class NewsBot:
             
             # Публикация на 9111.ru
             if self.ninth_available:
+                logger.info("🔄 Начинаю публикацию на 9111.ru...")
                 loop = asyncio.get_event_loop()
                 success = await loop.run_in_executor(
                     None, self.publish_to_9111,
@@ -1279,7 +1336,7 @@ class NewsBot:
     async def start(self):
         """Запуск бота"""
         logger.info("=" * 80)
-        logger.info("🚀 NEWS BOT 15.1 - ПОЛНОСТЬЮ ИСПРАВЛЕН")
+        logger.info("🚀 NEWS BOT 16.0 - ПОЛНАЯ ДИАГНОСТИКА")
         logger.info("=" * 80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ Интервал: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
