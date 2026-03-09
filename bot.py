@@ -1,11 +1,12 @@
 """
-🤖 Telegram News Bot - Версия 12.0
+🤖 Telegram News Bot - Версия 12.1
 АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛИКАТОВ (5 УРОВНЕЙ) + 9111.RU
 - Уровень 1: Проверка по URL
 - Уровень 2: Проверка по нормализованному заголовку
 - Уровень 3: Проверка по хешу содержимого
 - Уровень 4: Проверка по первому предложению
 - Уровень 5: Проверка по схожести заголовков (75%) с историей Telegram
+- Исправлен метод получения истории Telegram
 - Исправлена публикация на 9111.ru (передача cookies)
 - Сохранение скриншотов и HTML для анализа
 """
@@ -346,24 +347,77 @@ class NewsBot:
             logger.info("📚 Загрузка заголовков из Telegram в кэш...")
             self.telegram_titles_cache = []
             
-            async for message in self.bot.get_chat_history(chat_id=CHANNEL_ID, limit=100):
-                if message.caption:  # Если пост с фото
-                    # Извлекаем заголовок (первая строка, убираем HTML теги)
-                    caption_lines = message.caption.split('\n')
-                    if caption_lines:
-                        title = re.sub(r'<[^>]+>', '', caption_lines[0]).strip()
-                        if title:
-                            self.telegram_titles_cache.append(title)
-                elif message.text:   # Если просто текст
-                    text_lines = message.text.split('\n')
-                    if text_lines:
-                        title = re.sub(r'<[^>]+>', '', text_lines[0]).strip()
-                        if title:
-                            self.telegram_titles_cache.append(title)
+            # Получаем последние 100 сообщений из канала
+            updates = await self.bot.get_updates()
+            
+            # Собираем все message_id из канала
+            message_ids = []
+            for update in updates:
+                if update.channel_post and str(update.channel_post.chat_id) == CHANNEL_ID.replace('@', ''):
+                    message_ids.append(update.channel_post.message_id)
+            
+            # Сортируем и берём последние 100
+            message_ids.sort(reverse=True)
+            message_ids = message_ids[:100]
+            
+            # Получаем каждое сообщение по ID
+            for msg_id in message_ids:
+                try:
+                    message = await self.bot.get_message(chat_id=CHANNEL_ID, message_id=msg_id)
+                    
+                    if message.caption:  # Если пост с фото
+                        # Извлекаем заголовок (первая строка, убираем HTML теги)
+                        caption_lines = message.caption.split('\n')
+                        if caption_lines:
+                            title = re.sub(r'<[^>]+>', '', caption_lines[0]).strip()
+                            if title and len(title) > 10:
+                                self.telegram_titles_cache.append(title)
+                    elif message.text:   # Если просто текст
+                        text_lines = message.text.split('\n')
+                        if text_lines:
+                            title = re.sub(r'<[^>]+>', '', text_lines[0]).strip()
+                            if title and len(title) > 10:
+                                self.telegram_titles_cache.append(title)
+                except Exception as e:
+                    logger.debug(f"Не удалось получить сообщение {msg_id}: {e}")
+                    continue
             
             logger.info(f"✅ Загружено {len(self.telegram_titles_cache)} заголовков")
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки заголовков из Telegram: {e}")
+            # Пробуем альтернативный метод
+            await self.load_telegram_titles_cache_alternative()
+
+    async def load_telegram_titles_cache_alternative(self):
+        """Альтернативный метод загрузки заголовков"""
+        try:
+            logger.info("📚 Альтернативный метод загрузки заголовков...")
+            
+            # Пробуем получить историю через другой метод
+            # Для этого нам нужно знать ID канала в числовом формате
+            chat = await self.bot.get_chat(chat_id=CHANNEL_ID)
+            
+            # Получаем последние сообщения через get_chat_history (если доступно)
+            # В некоторых версиях python-telegram-bot есть этот метод
+            if hasattr(self.bot, 'get_chat_history'):
+                async for message in self.bot.get_chat_history(chat_id=CHANNEL_ID, limit=100):
+                    if message.caption:
+                        caption_lines = message.caption.split('\n')
+                        if caption_lines:
+                            title = re.sub(r'<[^>]+>', '', caption_lines[0]).strip()
+                            if title:
+                                self.telegram_titles_cache.append(title)
+                    elif message.text:
+                        text_lines = message.text.split('\n')
+                        if text_lines:
+                            title = re.sub(r'<[^>]+>', '', text_lines[0]).strip()
+                            if title:
+                                self.telegram_titles_cache.append(title)
+            
+            logger.info(f"✅ Альтернативный метод загрузил {len(self.telegram_titles_cache)} заголовков")
+        except Exception as e:
+            logger.error(f"❌ Альтернативный метод тоже не сработал: {e}")
+            logger.info("ℹ️ Продолжаем работу без кэша заголовков")
 
     def check_telegram_duplicate(self, new_title):
         """Проверяет, нет ли похожего заголовка в кэше Telegram"""
@@ -1516,7 +1570,7 @@ class NewsBot:
 
     async def start(self):
         logger.info("="*80)
-        logger.info("🚀 NEWS BOT 12.0 - 5 УРОВНЕЙ ЗАЩИТЫ + 9111.RU")
+        logger.info("🚀 NEWS BOT 12.1 - 5 УРОВНЕЙ ЗАЩИТЫ + 9111.RU")
         logger.info("="*80)
         logger.info(f"📢 Канал: {CHANNEL_ID}")
         logger.info(f"⏱ ХАОТИЧНЫЙ РЕЖИМ: {MIN_POST_INTERVAL//60}-{MAX_POST_INTERVAL//60} мин")
