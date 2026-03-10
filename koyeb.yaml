@@ -1,0 +1,23 @@
+name: news-bot
+service:
+  name: news-bot
+  instance_type: free
+  ports:
+    - port: 8080
+      protocol: http
+  routes:
+    - path: /
+  git:
+    repository: ваш-username/news-bot-telegram
+    branch: main
+    build_command: pip install -r requirements.txt
+    run_command: python bot.py
+  environment_variables:
+    - key: TELEGRAM_TOKEN
+      value: 8767446234:AAGRz1sJfDtV321CpUBdI2sqGVDcWryGqcY
+    - key: CHANNEL_ID
+      value: "@Novikon_news"
+    - key: NINTH_EMAIL
+      value: "ganjo1986@mail.ru"
+    - key: NINTH_PASSWORD
+      value: "jaGTrQJMbNKZdymxjIf1"
